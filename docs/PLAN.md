@@ -240,7 +240,29 @@ Soul Harness 是一个**独立运行的认知运行时**，不依赖 DSH、Minec
 - Archive Writer 对外只有两个接口：**`append`（写）** 与 **`status`（只回 `eventId`/`archiveState`/`archiveRef`）**；
   状态查询**不返回任何内容**，二者不得合并。
 
-> 详细流转见 `RUNTIME-LIFECYCLE.md` §7.1–§7.6；字段级约束见 `DATA-MODEL.md` §3.1 / §3.3 / §5.1 / §5.2。
+**决议十一：eventId 重试、`failed` 语义与终态原因码（SH-002.4 新增）。**
+
+同 `eventId` 重试的五种情形（完整表见 `RUNTIME-LIFECYCLE.md` §7.3）：
+
+| 情形 | 允许 | 禁止 |
+|---|---|---|
+| Archive 已写、events 提交未完成 | 查 `status` 后**只补提交** | 重复 append |
+| Archive 未写、缓冲有效 | 同 `eventId` 受控重试（先幂等检查） | 建第二条事件记录 |
+| Archive 未写、缓冲丢失 | 标 `expired`（`buffer_lost`） | 凭空恢复正文；用新 eventId 冒充 |
+| 已 `accepted` | 只返回已有状态 | 重复归档、重复进认知 |
+| 同 eventId 不同正文 | 拒绝覆盖 + `archive_conflict` | 覆盖原记录 |
+
+- **`archive_state` 与 `status` 是两个维度**：`failed` 不自动等于 `expired`。
+- `failed` 是否可重试**取决于缓冲是否仍有效**；缓冲失效必须终止为 `expired`，不得伪造成功。
+- **崩溃恢复扫描对象是 `pending`**，不是 `failed`。
+- `expired` / `rejected` 是终态且**必须**带受控原因码；其他状态原因码**必须为 NULL**。
+  原因码只能取枚举值，禁止自由文本、异常堆栈、原文片段。
+
+**决议十二：保留天数仍未决定（OPEN）。** 本任务不擅自设定 Archive 保留天数，
+`expires_at` 的取值来源与三档数值仍待定。
+
+> 详细流转见 `RUNTIME-LIFECYCLE.md` §7.1–§7.6；字段与 CHECK 约束见
+> `DATA-MODEL.md` §3.1 / §3.3 / §3.4 / §3.5 / §5.1 / §5.2。
 
 ## 7. 开发阶段 P0–P9 与各阶段验收
 

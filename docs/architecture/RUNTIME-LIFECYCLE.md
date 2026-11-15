@@ -300,13 +300,34 @@ Adapter 提交（信封 + 正文）
 | Archive 长时间不可用 | 对 `required` 源停止受理（503），而不是收下却记不住 |
 | `excluded` 事件 | 与 Archive 无关，照常处理；无审计 |
 
-**幂等（硬要求）**
+**幂等与同 eventId 重试（硬要求）**
 
 1. **Archive Writer 自己负责 `eventId` 幂等**：同一 `eventId` 重复 append 不得产生第二条记录。
 2. **同一 `eventId` 对应不同内容 → 拒绝覆盖并报告冲突**（`archive_conflict`）：
-   保留原始记录不变，冲突写入审计（**不含内容**），该 `eventId` 标记为冲突待人工处理。
+   保留原始记录不变，事件转 `rejected`（原因码 `archive_conflict`），冲突写入审计（**不含内容**）。
    判定在 Archive Writer 内部完成（键控指纹，见 `DATA-MODEL.md` §5.1）；Brain 只见错误码。
-3. 恢复流程**不得**改变 `eventId`、不得为同一条刺激生成新的 `eventId`。
+3. **同 eventId 重试不得创建第二条事件记录**：`events.id` 是主键，重试走"读取已有行 → 决策"，
+   不走"插入新行"。
+4. 恢复流程**不得**改变 `eventId`，**不得**为同一条刺激生成新 `eventId`。
+
+**同 eventId 重试决策表**
+
+| # | 情形 | 判据 | 允许的动作 | 明令禁止 |
+|---|---|---|---|---|
+| 1 | Archive 已写入，events 提交未完成 | `archive_state='pending'` 且 IPC `status` 返回 `archived` | 只补齐事件表提交：`archive_ref` + `'archived'` + `status='accepted'`（同一短事务） | **再次 append**（会撞幂等或产生冲突） |
+| 2 | Archive 未写入，缓冲仍有效 | IPC `status` 返回 `not_found`，且缓冲未过期 | 同一 `eventId` **受控重试**：先幂等检查（是否已有 `archived` 记录 / 是否已有事件行），再 append | 创建第二条事件记录；更换 `eventId` |
+| 3 | Archive 未写入，缓冲已丢失 | IPC `not_found`，且缓冲已随崩溃/过期失效 | 标 `status='expired'`，原因码 `buffer_lost`；`archive_state='failed'` | 凭空恢复正文；用新 `eventId` 伪装成原事件重试 |
+| 4 | 已 `accepted` | 事件行 `status='accepted'` | 只返回已有状态（含 `archive_ref` 是否存在） | 重复归档；重复进入认知流程（不得二次编码/二次应答） |
+| 5 | 同 eventId 不同正文 | Archive 侧指纹不匹配 | 拒绝覆盖；`status='rejected'`（`archive_conflict`）；保留原记录 | 覆盖原记录；静默接受新正文 |
+
+**关键区分**
+
+- 第 1 与第 2 种情形都叫"重试"，但**动作完全不同**：前者只补提交，后者才真正 append。
+  混淆两者会导致重复归档或永久 pending。
+- 第 3 种情形是"**终止**"，不是"重试"。系统必须承认内容已丢，而不是造一个"看起来成功"的结果。
+- 第 4 种情形保证 `accepted` 的幂等性：适配器重投不会让事件被处理两遍。
+
+详见 `DATA-MODEL.md` §3.5 的 `failed` / `expired` / `rejected` 转换规则。
 
 **恢复流程（Brain 不直连 Archive）**
 
@@ -374,7 +395,7 @@ t1' 崩溃（**Archive 尚未写入**）
 | 同一会话队列满 | 新事件 `status = expired`（`queue_overflow`）；对适配器回 429，**不静默丢弃** |
 | 事件超过 TTL 仍未注意 | `status = expired`；缓冲删除 |
 | 适配器重投同一 `eventId` | 按 `eventId` 幂等：已存在则不重复处理，返回已有状态 |
-| 处理失败（非 Archive） | 有限重试（默认 3 次），超限 `status = rejected`；记录原因码，不进主观记忆 |
+| 处理失败（非 Archive） | 有限重试（默认 3 次），超限 `status='rejected'`，原因码 `processing_failed`（受控枚举，见 `DATA-MODEL.md` §3.4）；不进主观记忆 |
 | 迟到事件（`occurred_at` 远早于 `received_at`） | 允许处理，但 `subjective_time` 必须用 `occurred_at` 与接收时间共同表达，不得伪装成"刚刚发生" |
 
 所有队列必须**有限、可过期、带反刷屏限流**。
@@ -397,11 +418,35 @@ t1' 崩溃（**Archive 尚未写入**）
 
 **终态定义（两者一致）**
 
-未完成认知处理的事件，恢复后只能落在以下终态之一，且必须带原因码：
+未完成认知处理的事件，恢复后只能落在以下终态之一，且**必须带受控原因码**：
 
-- `expired`：TTL 到期、队列溢出、缓冲随崩溃丢失（`buffer_lost`）；
-- `rejected`：鉴权失败、注入嫌疑、Archive 不可用（`archive_unavailable`）；
+- `expired`：`buffer_lost` / `ttl_expired` / `queue_overflow`；
+- `rejected`：`auth_failed` / `untrusted_source` / `schema_invalid` / `rate_limited` /
+  `archive_unavailable` / `archive_conflict`；
 - `understood` **只有在模型确实完成解释后**才允许出现。**崩溃恢复不得推断、不得补写 `understood`。**
+
+#### 7.6.1 `failed` 的语义（与 `expired` 严格区分）
+
+| 判断 | 结论 |
+|---|---|
+| `archive_state='failed'` 等于事件终结吗？ | **不等于。** 它只表示"归档这次尝试失败" |
+| `failed` 会自动变 `expired` 吗？ | **不会自动。** 只有缓冲失效或 TTL 到期才转 `expired` |
+| `failed` 时能重试吗？ | **取决于缓冲是否仍有效**：有效则允许同 `eventId` 受控重试；失效则必须转 `expired` |
+| 崩溃恢复扫 `failed` 吗？ | **不扫。** 扫描对象是 `pending`；`failed` 是"等外部重试"的状态 |
+| `failed` 能变成成功吗？ | 只能通过**同 eventId 重新 append 成功**后走正常提交；不得直接改状态"假装修好" |
+| 缓冲丢了还能把 `failed` 补成 `archived` 吗？ | **不能。** 禁止伪造成功、禁止从 Archive 反读正文重建 |
+
+**三个名字不要混用**
+
+| 名字 | 属于 | 含义 |
+|---|---|---|
+| `failed` | `archive_state` | 归档尝试失败的瞬时状态，**可重试** |
+| `expired` | `status` | 事件生命周期终结，内容已丢失或超时，**不可复活** |
+| `rejected` | `status` | 被明确拒绝（鉴权/来源/冲突/限流），**不可复活** |
+
+三者关系：`failed` 是过程状态；`expired` 与 `rejected` 是终态。**`failed` 不等于任何终态。**
+
+转换全表见 `DATA-MODEL.md` §3.5；原因码枚举与 CHECK 约束见 `DATA-MODEL.md` §3.4。
 
 ## 8. 睡眠与唤醒
 

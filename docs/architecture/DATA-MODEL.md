@@ -100,8 +100,20 @@ CREATE TABLE events (
   -- 归档状态：与 archive_ref 分离，支持"已归档但引用未提交"的崩溃恢复
   archive_state  TEXT NOT NULL DEFAULT 'none'
                  CHECK (archive_state IN ('none','pending','archived','failed','excluded')),
-  -- 终态原因码（进入 expired/rejected 时必填，见 RUNTIME-LIFECYCLE §7.6）
-  status_reason  TEXT
+  -- 终态原因码：受控枚举，且必须与 status 配对（见 §3.4）
+  status_reason  TEXT,
+  CHECK (
+    (status IN ('expired','rejected') AND status_reason IS NOT NULL)
+    OR
+    (status NOT IN ('expired','rejected') AND status_reason IS NULL)
+  ),
+  CHECK (
+    status_reason IS NULL
+    OR (status = 'expired' AND status_reason IN ('buffer_lost','ttl_expired','queue_overflow'))
+    OR (status = 'rejected' AND status_reason IN
+        ('auth_failed','untrusted_source','schema_invalid','rate_limited',
+         'archive_unavailable','archive_conflict','processing_failed'))
+  )
 );
 CREATE INDEX ix_events_persona_status ON events (persona_id, status, received_at);
 CREATE INDEX ix_events_session ON events (session_id, received_at);
@@ -156,7 +168,7 @@ CREATE TABLE schema_migrations (
 | `events.archive_ref` | 不透明引用（ID 或哈希），**不是路径**；**P1 允许 NULL** | 文件路径、可直接读取的 URI、SQL 片段、密钥材料 |
 | `events.archive_state` | 枚举 `none/pending/archived/failed/excluded` | 任何原文或可推断原文的附加信息 |
 | `events.archive_disposition` | 枚举 `required/excluded`（P1 为 NULL） | 模型产出的判定、自由文本理由 |
-| `events.status_reason` | 枚举原因码（`buffer_lost` / `queue_overflow` / `archive_unavailable` / `auth_failed` …） | 自由文本、错误消息原文、异常堆栈中含内容的片段 |
+| `events.status_reason` | 受控枚举，且必须与状态配对（完整清单见 §3.4） | 自由文本、错误消息原文、异常堆栈、任何含内容的片段 |
 | `tasks.payload_json` | **只放引用**：`eventId` / `nodeId` / `threadId` / 参数枚举 | 任何原文、上下文正文、模型输入原文 |
 | `runtime_state.checkpoint_json` | 游标、队列位置、版本号、活跃 ID 列表 | 任何正文、对话片段、思维内容 |
 | 日志 / 遥测 | 计数、耗时、错误码、ID | 默认不记录原文；确需时须脱敏并显式开关 |
@@ -222,6 +234,77 @@ CREATE TABLE schema_migrations (
 
 - `excluded` 事件：直接以 `archive_state='excluded'`、`status='accepted'` 入库，一步完成。
 - P1：直接以 `archive_state='none'`、`archive_disposition=NULL`、`status='accepted'` 入库。
+
+### 3.4 `archive_state` 与 `status` 的分离，及 `failed` 的语义
+
+**两个字段回答两个不同问题，不许互相推导：**
+
+| 字段 | 回答的问题 | 取值 |
+|---|---|---|
+| `archive_state` | "原始记录归档到哪一步了？" | `none` / `pending` / `archived` / `failed` / `excluded` |
+| `status` | "这条事件在生命周期里到哪一步了？" | `received` / `accepted` / `noticed` / `understood` / `response_committed` / `acted` / `rejected` / `expired` |
+
+**`failed` 不自动等于 `expired`。**
+
+- `archive_state='failed'` 只说明**归档这次尝试失败了**，不代表事件已经终结。
+- 事件是否终结，取决于**原始缓冲是否仍然有效**：
+  - 缓冲有效 → 事件可保持 `status='received'`，等待**同一 eventId** 受控重试；
+  - 缓冲已失效 → 事件**必须**转 `status='expired'`，原因码 `buffer_lost`
+    （内容确实没了，这是根因；归档失败本身由 `archive_state='failed'` 表达）；
+  - 若策略或管理员**显式拒绝**该源输入（例如该源要求审计而 Archive 被管理性关闭），
+    才使用 `rejected` + `archive_unavailable`。
+- **`pending` 才是崩溃恢复扫描的主要对象**；`failed` 不是恢复扫描目标（它是"等外部重试"的状态）。
+
+**`status_reason` 规则（受控枚举，与状态配对）**
+
+| status | 是否必须带原因码 | 允许的原因码 |
+|---|---|---|
+| `expired` | **必须** | `buffer_lost` / `ttl_expired` / `queue_overflow` |
+| `rejected` | **必须** | `auth_failed` / `untrusted_source` / `schema_invalid` / `rate_limited` / `archive_unavailable` / `archive_conflict` / `processing_failed` |
+| 其他状态 | **必须为 NULL** | — |
+
+- 原因码**只能是**上表中的字面量；**禁止**自由文本、错误消息原文、异常堆栈
+  （堆栈可能夹带 payload，等于原文旁路）。
+- 数据库层已用两条 `CHECK` 强制"配对 + 枚举"，应用层不得绕过。
+- 新增原因码需要改本文件与 migration，不允许运行时拼接。
+
+### 3.5 `failed` / `expired` / `rejected` 的转换规则
+
+```
+                        ┌──────────────────────────┐
+                        │  required, 归档中          │
+                        │  status=received           │
+                        │  archive_state=pending     │
+                        └───────┬──────────┬────────┘
+                    归档成功│          │归档失败/重试耗尽
+                            ▼          ▼
+              ┌──────────────────┐  ┌──────────────────────────┐
+              │ status=accepted  │  │ status=received           │
+              │ archive_state=   │  │ archive_state=failed      │
+              │   archived       │  │ （缓冲仍有效 → 可重试）    │
+              └──────────────────┘  └───────┬──────────────────┘
+                                            │缓冲失效 / TTL 到期
+                                            ▼
+                                  ┌──────────────────────────┐
+                                  │ status=expired            │
+                                  │ reason=buffer_lost        │
+                                  └──────────────────────────┘
+```
+
+| 起点 | 终点 | 触发条件 |
+|---|---|---|
+| `pending` | `archived` + `accepted` | Archive append 成功，三字段同事务提交 |
+| `pending` | `failed` + 仍 `received` | append 失败且重试耗尽，**缓冲仍有效** |
+| `failed` + `received` | `archived` + `accepted` | 同 eventId 重试成功 |
+| `failed` + `received` | `expired`（`buffer_lost`） | 缓冲失效或 TTL 到期（内容已不可用） |
+| `failed` + `received` | `rejected`（`archive_unavailable`） | 策略/管理员显式拒绝该源（不再等待重试） |
+| `pending` / `failed` | `expired`（`buffer_lost`） | 崩溃后重启，缓冲已消失 |
+| 任意 | `rejected`（`auth_failed` / `untrusted_source` / `schema_invalid` / `rate_limited` / `processing_failed`） | 入站校验失败或处理重试耗尽 |
+| 任意 | `rejected`（`archive_conflict`） | 同 eventId 不同正文 |
+| `accepted` | `expired`（`ttl_expired` / `queue_overflow`） | 注意阶段未处理而超时/溢出 |
+
+**终态**：`expired` 与 `rejected` 是终态，**不可再回到 `accepted`**。
+`failed` **不是终态**，它只是 `archive_state` 的一个取值。
 
 ## 4. 二期表（P3–P5：记忆网络与思维）
 
