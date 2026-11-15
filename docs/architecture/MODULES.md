@@ -46,7 +46,7 @@
 |---|---|---|---|
 | `contracts` | 协议类型、JSON Schema、ID 类型、版本与能力常量 | 运行时逻辑、IO、状态、**数据库列映射** | 未实现 |
 | `persistence` | SQLite 连接、单写入协调器、事务、migration、检查点、密钥指针、**camelCase↔snake_case 映射** | 业务语义；不判断"该不该记" | 未实现 |
-| `runtime` | Persona 生命周期、事件总线、任务队列、状态恢复、提案验证与提交、版本/epoch 控制、**归档决策记录（`archive_decisions`）写入** | 语义解释；不生成回答；**不读 Archive** | 未实现 |
+| `runtime` | Persona 生命周期、事件总线、任务队列、状态恢复（**pending 归档恢复 + failed 缓冲清理两类扫描**）、提案验证与提交、版本/epoch 控制、**归档决策与冲突审计记录写入** | 语义解释；不生成回答；**不读 Archive** | 未实现 |
 | `personality` | 自我叙事、情绪、关系多维表征、特质缓变 | 不写记忆正文；不授权现实动作 | 未实现 |
 | `attention` | 前注意过滤、优先级、唤醒分级、注意结果（ignored/queued/aware） | 不理解内容；不生成回应 | 未实现 |
 | `perception` | 感知规范化、选择性编码判定、短暂缓冲（TTL） | 不长期保存原文；不建立关联 | 未实现 |

@@ -268,6 +268,17 @@ CREATE TABLE schema_migrations (
 - 数据库层已用两条 `CHECK` 强制"配对 + 枚举"，应用层不得绕过。
 - 新增原因码需要改本文件与 migration，不允许运行时拼接。
 
+**`expired` 三个原因码的语义（互斥，不得混用）**
+
+| 原因码 | 含义 | 典型触发 | 检测点 |
+|---|---|---|---|
+| `buffer_lost` | 原始缓冲**因进程崩溃/重启而丢失**（非时间原因） | Daemon 异常退出、被强杀、重启后发现缓冲为空 | 启动恢复扫描 |
+| `ttl_expired` | 事件**自身的 TTL 到期** | 缓冲存活期内未被注意或未被编码 | 运行期定时清理 |
+| `queue_overflow` | **队列容量溢出**，新事件无法入队 | 同会话队列已满 | 入队时 |
+
+判定原则：**先看是不是"进程原因"**。同一事件若既 crash 过又 TTL 到期，以 `buffer_lost` 记
+（它是更早、更根本的原因）；一旦转为终态即不再改原因码。
+
 ### 3.5 `failed` / `expired` / `rejected` 的转换规则
 
 ```
@@ -288,6 +299,7 @@ CREATE TABLE schema_migrations (
                                   ┌──────────────────────────┐
                                   │ status=expired            │
                                   │ reason=buffer_lost        │
+                                  │   （重启）或 ttl_expired   │
                                   └──────────────────────────┘
 ```
 
@@ -296,7 +308,8 @@ CREATE TABLE schema_migrations (
 | `pending` | `archived` + `accepted` | Archive append 成功，三字段同事务提交 |
 | `pending` | `failed` + 仍 `received` | append 失败且重试耗尽，**缓冲仍有效** |
 | `failed` + `received` | `archived` + `accepted` | 同 eventId 重试成功 |
-| `failed` + `received` | `expired`（`buffer_lost`） | 缓冲失效或 TTL 到期（内容已不可用） |
+| `failed` + `received` | `expired`（`buffer_lost`） | **进程重启/崩溃后缓冲已丢失**（启动清理，见 RUNTIME §7.3.1 扫描 B） |
+| `failed` + `received` | `expired`（`ttl_expired`） | 运行期缓冲 TTL 正常到期 |
 | `failed` + `received` | `rejected`（`archive_unavailable`） | 策略/管理员显式拒绝该源（不再等待重试） |
 | `pending` / `failed` | `expired`（`buffer_lost`） | 崩溃后重启，缓冲已消失 |
 | 任意 | `rejected`（`auth_failed` / `untrusted_source` / `schema_invalid` / `rate_limited` / `processing_failed`） | 入站校验失败或处理重试耗尽 |
@@ -507,6 +520,22 @@ CREATE TABLE archive_decisions (
   expires_at     INTEGER NOT NULL         -- 决策记录自身保留期限
 );
 CREATE INDEX ix_decisions_policy ON archive_decisions (policy_id, policy_version, decided_at);
+
+-- 归档冲突记录：只记"某 eventId 出现了异内容重投"，不记内容本身。
+-- 归属：Reliable World / 审计侧；由 runtime 在收到 append 返回 conflict 时写入。
+CREATE TABLE archive_conflict_records (
+  id            TEXT PRIMARY KEY,        -- 冲突事件自身 ID（**不是** eventId，不得冒充原事件）
+  event_id      TEXT NOT NULL,           -- 被冲突的原事件
+  detected_at   INTEGER NOT NULL,
+  source        TEXT NOT NULL,
+  adapter_id    TEXT,
+  original_status TEXT NOT NULL,         -- 冲突被发现时原事件所处的 status（快照）
+  original_archive_state TEXT,           -- 同上，archive_state 快照
+  resolution    TEXT NOT NULL DEFAULT 'open'
+                CHECK (resolution IN ('open','kept_original','manual_resolved')),
+  expires_at    INTEGER NOT NULL
+);
+CREATE INDEX ix_conflict_event ON archive_conflict_records (event_id, detected_at);
 ```
 
 ### 5.1 Archive 表字段约束（完整性、指纹、保留）
@@ -560,6 +589,34 @@ CREATE INDEX ix_decisions_policy ON archive_decisions (policy_id, policy_version
 - **读取**：管理员审计与 Studio 的审计视图；**Brain 运行时上下文不得读取**
   （它会让模型"知道自己被审计"从而改变行为，且本身就是审计信息泄露）。
 - **保留**：`expires_at` 到期删除；与事件记录、Archive 记录**各自独立**，不随其删除而删除。
+
+### 5.3 归档冲突记录（archive_conflict_records）
+
+**问题**：`events.id` 是主键，冲突请求（同 `eventId`、不同正文）**无法**用同一 `eventId` 再插一条事件行。
+若把原事件改写成 `rejected` 来表示"有冲突"，就等于让一条异内容请求**顶替**了原事件 —— 这是不可接受的。
+
+**规则**
+
+| 角色 | 处理 |
+|---|---|
+| **原事件记录** | **一律不改状态**。禁止因冲突重投把 `accepted` / `noticed` / `understood` / `response_committed` / `acted` 改写为 `rejected` |
+| **冲突请求** | 不落 `events` 行；直接对适配器返回冲突响应（409 `archive_conflict`），**不 ACK** |
+| **冲突审计** | 写入本表，一条请求一条记录，`id` 是独立的冲突 ID，**不是** `eventId` |
+
+**唯一例外**：原事件仍处于 `status='received'` 且 `archive_state='pending'`（尚未 `accepted`）时，
+归档无法完成，可将**原事件**转为 `rejected`（`archive_conflict`）—— 因为它本来就还没被接受。
+一旦原事件进入 `accepted` 或更靠后的状态，**永不改写**。
+
+**禁止字段**
+
+- 冲突正文、正文摘要、关键词；
+- 原文的普通 SHA-256 或任何可反推内容的派生值；
+- 原文长度、字符数、token 数；
+- 解密后的任何片段。
+
+**允许字段**（即上文 DDL）：冲突 ID、`eventId`、检测时间、来源、适配器、原事件状态快照、处置状态、过期时间。
+
+> 指纹比对发生在 Archive Writer 内部；它只回一个 `conflict` 结果码，不回指纹本身。
 
 ## 6. 版本与纪元
 

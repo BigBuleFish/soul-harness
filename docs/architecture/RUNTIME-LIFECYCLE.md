@@ -304,7 +304,10 @@ Adapter 提交（信封 + 正文）
 
 1. **Archive Writer 自己负责 `eventId` 幂等**：同一 `eventId` 重复 append 不得产生第二条记录。
 2. **同一 `eventId` 对应不同内容 → 拒绝覆盖并报告冲突**（`archive_conflict`）：
-   保留原始记录不变，事件转 `rejected`（原因码 `archive_conflict`），冲突写入审计（**不含内容**）。
+   - **原事件状态一律不改**（尤其禁止把已 `accepted` 及之后的状态改写为 `rejected`）；
+   - 冲突请求不落 `events` 行，直接返回 409 `archive_conflict`，**不 ACK**；
+   - 冲突写入独立审计记录（**不含内容**，字段见 `DATA-MODEL.md` §5.3）；
+   - **唯一例外**：原事件仍是 `received` + `pending`（从未 `accepted`）时，可转 `rejected`（`archive_conflict`）。
    判定在 Archive Writer 内部完成（键控指纹，见 `DATA-MODEL.md` §5.1）；Brain 只见错误码。
 3. **同 eventId 重试不得创建第二条事件记录**：`events.id` 是主键，重试走"读取已有行 → 决策"，
    不走"插入新行"。
@@ -318,7 +321,7 @@ Adapter 提交（信封 + 正文）
 | 2 | Archive 未写入，缓冲仍有效 | IPC `status` 返回 `not_found`，且缓冲未过期 | 同一 `eventId` **受控重试**：先幂等检查（是否已有 `archived` 记录 / 是否已有事件行），再 append | 创建第二条事件记录；更换 `eventId` |
 | 3 | Archive 未写入，缓冲已丢失 | IPC `not_found`，且缓冲已随崩溃/过期失效 | 标 `status='expired'`，原因码 `buffer_lost`；`archive_state='failed'` | 凭空恢复正文；用新 `eventId` 伪装成原事件重试 |
 | 4 | 已 `accepted` | 事件行 `status='accepted'` | 只返回已有状态（含 `archive_ref` 是否存在） | 重复归档；重复进入认知流程（不得二次编码/二次应答） |
-| 5 | 同 eventId 不同正文 | Archive 侧指纹不匹配 | 拒绝覆盖；`status='rejected'`（`archive_conflict`）；保留原记录 | 覆盖原记录；静默接受新正文 |
+| 5 | 同 eventId 不同正文 | Archive 侧指纹不匹配 | 见下方"冲突处理"：原事件不动 + 409 + 冲突审计 | 覆盖原记录；静默接受；**改写原事件状态** |
 
 **关键区分**
 
@@ -367,6 +370,55 @@ t1' 崩溃（**Archive 尚未写入**）
 
 **不允许的"聪明做法"**：把正文暂存到 `tasks.payload_json` 等它恢复；写临时文件；压进日志；
 重试时换 `eventId` 绕过冲突；让 Brain 直连 Archive"只读确认一下"；崩溃后用 Archive 正文重建缓冲。
+
+**冲突处理（原事件已 `accepted` 时）**
+
+```
+原事件 E（eventId=X）早已 accepted/noticed/understood/…
+Adapter 用同一 X、不同正文重投
+   │
+   ▼
+Archive append → 指纹不匹配 → 返回 conflict
+   │
+   ├─ 原事件 E：**状态不变**，一个字都不改
+   ├─ 冲突请求：**不落 events 行**（events.id 是主键，也不能冒充）
+   ├─ 响应适配器：409 archive_conflict
+   └─ 写 archive_conflict_records（独立冲突 ID，字段见 DATA-MODEL §5.3）
+```
+
+**冲突审计记录的禁止字段**：冲突正文、摘要、关键词、原文普通 SHA-256、长度/token 数、
+任何可反推内容的派生值。记录只回答"谁在什么时候对哪个 eventId 重投了异内容"。
+
+#### 7.3.1 重启后的两类扫描（必须分开）
+
+> **`failed` 不是 `pending`。** 扫描目标不同、动作不同，混用会造成永久卡死或伪造归档。
+
+**扫描 A — 归档恢复（对象：`archive_state='pending'`）**
+
+| 步骤 | 动作 |
+|---|---|
+| A1 | 有界扫描 `archive_state='pending'` 的事件行 |
+| A2 | 调 `archive.status(eventId)`（只回三字段） |
+| A3 | 返回 `archived` → **只补提交**：`archive_ref` + `'archived'` + `status='accepted'`（同一短事务） |
+| A4 | 返回 `not_found` → **直接终态**：`archive_state='failed'`、`status='expired'`、原因码 `buffer_lost` |
+| A5 | 返回 `failed`/冲突 → 记录上报，不自动"修复" |
+
+**禁止**：扫描 A **不得**把 `failed` 当作待补归档；**不得**从 Archive 反读正文重建缓冲（IPC 也不给正文）。
+
+**扫描 B — 缓冲生命周期清理（对象：`archive_state='failed'` 且 `status='received'`）**
+
+| 时机 | 判断 | 动作 |
+|---|---|---|
+| **Daemon 启动** | 缓冲在内存中，重启即丢 → 必然失效 | 一律转 `status='expired'`、原因码 `buffer_lost`。**不允许**留在 `failed + received` |
+| **运行期定时清理** | 缓冲仍在但已过 TTL | 转 `status='expired'`、原因码 `ttl_expired` |
+| 运行期缓冲仍有效 | 未过期 | **保持** `failed + received`，等待同 eventId 受控重试（不主动终止） |
+
+**为什么启动时必须一律终止**：缓冲不落盘，进程重启后它一定没了。
+若把 `failed + received` 留在库里，适配器看到的"还在等重试"就是假的，
+而且重试时会发现没有正文可归档 —— 那才是真正的一致性问题。
+
+**启动清理顺序**：先 A 后 B（A 的 `not_found` 分支会产生新的 `failed`，B 不会再碰它，
+因为 A 已直接置为 `expired`）。两次扫描都必须有界、限速、可中断。
 
 ### 7.4 ACK 语义（按 disposition 区分）
 

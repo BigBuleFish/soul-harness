@@ -258,11 +258,38 @@ Soul Harness 是一个**独立运行的认知运行时**，不依赖 DSH、Minec
 - `expired` / `rejected` 是终态且**必须**带受控原因码；其他状态原因码**必须为 NULL**。
   原因码只能取枚举值，禁止自由文本、异常堆栈、原文片段。
 
-**决议十二：保留天数仍未决定（OPEN）。** 本任务不擅自设定 Archive 保留天数，
+**决议十二：重启后的两类扫描（SH-002.5 新增）。**
+
+- **扫描 A（归档恢复）**：对象只有 `archive_state='pending'`。查 Archive 状态，
+  已归档则**只补提交**，未找到则直接转 `expired`（`buffer_lost`）。
+- **扫描 B（缓冲清理）**：对象是 `failed + received`。**Daemon 启动时一律转
+  `expired`（`buffer_lost`）**，因为缓冲在内存、重启必丢；运行期仅在 TTL 到期时转
+  `expired`（`ttl_expired`），缓冲仍有效则保持等待重试。
+- **`failed` 不得当作 `pending`**；不得从 Archive 反读正文重建缓冲；
+  **不允许**事件永久停留在 `failed + received`。
+
+**决议十三：归档冲突不得破坏原事件（SH-002.5 新增）。**
+
+- 原事件状态**一律不改**：已 `accepted` / `noticed` / `understood` / `response_committed` / `acted`
+  的事件，**永不**因冲突重投改写为 `rejected`。
+- 冲突请求不落 `events` 行（`events.id` 是主键，也不允许冒充原事件），直接返回 409。
+- 冲突写入独立审计 `archive_conflict_records`（独立冲突 ID），
+  **禁止**保存冲突正文、摘要、原文普通哈希、长度或任何可反推内容的派生值。
+- **唯一例外**：原事件仍是 `received` + `pending`（从未 `accepted`）时，可转 `rejected`（`archive_conflict`）。
+
+**决议十四：`expired` 三个原因码语义互斥（SH-002.5 新增）。**
+
+| 原因码 | 含义 | 检测点 |
+|---|---|---|
+| `buffer_lost` | 进程崩溃/重启导致缓冲丢失 | 启动扫描 B |
+| `ttl_expired` | 事件自身 TTL 到期 | 运行期清理 |
+| `queue_overflow` | 队列容量溢出 | 入队时 |
+
+**决议十五：保留天数仍未决定（OPEN）。** 本任务不擅自设定 Archive 保留天数，
 `expires_at` 的取值来源与三档数值仍待定。
 
 > 详细流转见 `RUNTIME-LIFECYCLE.md` §7.1–§7.6；字段与 CHECK 约束见
-> `DATA-MODEL.md` §3.1 / §3.3 / §3.4 / §3.5 / §5.1 / §5.2。
+> `DATA-MODEL.md` §3.1 / §3.3 / §3.4 / §3.5 / §5.1 / §5.2 / §5.3。
 
 ## 7. 开发阶段 P0–P9 与各阶段验收
 
