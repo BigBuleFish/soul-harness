@@ -78,8 +78,11 @@ Soul Harness 是一个**独立常驻的认知运行时**：人格身份、主观
 | 认知 Runtime（主） | 主进程 | 共享活跃子图与调度器，拆开只会引入 IPC 延迟与一致性麻烦 |
 | Execution Gateway | 独立进程 + 独立权限令牌 | 现实动作的授权边界要与认知进程物理隔开 |
 | Archive Writer | 独立进程 + 独立文件权限 | 保证 Brain 进程拿不到档案句柄 |
-| Dream Sandbox | Worker / 子进程 | 梦境必须无真实工具、无网络、无文件写权限 |
-| 数值计算（图传播） | Worker Thread | 不阻塞事件循环；性能证据充分后再考虑 Rust |
+| Dream Sandbox | **独立进程**（不得用 Worker Thread） | 梦境必须无真实工具、无网络、无文件写权限；Worker 与主线程同进程共享权限，不构成隔离 |
+| 数值计算（图传播） | Worker Thread | 只用于性能，不承担安全边界；性能证据充分后再考虑 Rust |
+
+> **P1 现实**：上述隔离形态在阶段一尚不存在。P1 为单进程单库，Archive Writer / Action Gateway /
+> Dream Sandbox 均不启用（门槛见 `PLAN.md` §6.2 与 `MODULES.md` §7）。
 
 所有本地 IPC 带协议版本、身份与能力令牌。**服务重启不得导致人格状态清零。**
 

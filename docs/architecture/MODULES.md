@@ -44,8 +44,8 @@
 
 | 包 | 负责 | 不负责 | 状态 |
 |---|---|---|---|
-| `contracts` | 全部协议类型、JSON Schema、ID 类型、版本与能力常量、camelCase↔snake_case 映射 | 任何运行时逻辑、IO、状态 | 未实现 |
-| `persistence` | SQLite 连接、单写入协调器、事务、migration、检查点、密钥指针 | 业务语义；不判断"该不该记" | 未实现 |
+| `contracts` | 协议类型、JSON Schema、ID 类型、版本与能力常量 | 运行时逻辑、IO、状态、**数据库列映射** | 未实现 |
+| `persistence` | SQLite 连接、单写入协调器、事务、migration、检查点、密钥指针、**camelCase↔snake_case 映射** | 业务语义；不判断"该不该记" | 未实现 |
 | `runtime` | Persona 生命周期、事件总线、任务队列、状态恢复、提案验证与提交、版本/epoch 控制 | 语义解释；不生成回答 | 未实现 |
 | `personality` | 自我叙事、情绪、关系多维表征、特质缓变 | 不写记忆正文；不授权现实动作 | 未实现 |
 | `attention` | 前注意过滤、优先级、唤醒分级、注意结果（ignored/queued/aware） | 不理解内容；不生成回应 | 未实现 |
@@ -54,18 +54,18 @@
 | `activation` | 稀疏子图激活迭代、抑制、Hub 抑制、随机探索、传播预算 | 不生成回答；不写权威库 | 未实现 |
 | `cognition` | ThoughtProcess、inner/external 通道、意识渲染（ActivatedMemorySet → 有限视角） | 不做外部动作；不直连 Archive | 未实现 |
 | `memory-dynamics` | 巩固、重构、来源演化、衰退、真实遗忘事务 | 不授权动作；不读 Archive | 未实现 |
-| `sleep-dream` | 睡眠功能周期调度、Dream Sandbox、场景生成与体验者隔离、醒后切换 | 无真实工具/网络/文件权限 | 未实现 |
+| `sleep-dream` | 睡眠功能周期调度、Dream Sandbox、场景生成与体验者隔离、醒后切换 | 无真实工具/网络/文件权限；**不得仅靠 Worker Thread 隔离** | 未实现 |
 | `models` | 多供应商路由、质量分层、用量与失败记录、结构化提案解析 | 不校验业务权限；不直接写库 | 未实现 |
-| `action-gateway` | 现实权限校验、幂等、执行、回执、撤销（独立进程） | 不解释意图；不持有主观记忆 | 未实现 |
-| `archive-writer` | 原始记录落盘、完整性校验、保留策略（独立进程） | **不向 Brain 提供任何读取接口** | 未实现 |
+| `action-gateway` | 现实权限校验、幂等、执行、回执、撤销。**独立进程**，达门槛才启用 | 不解释意图；不持有主观记忆 | 未实现 |
+| `archive-writer` | 原始记录落盘、完整性校验、保留策略。**独立进程 + 独立权限**，达门槛才启用 | **不向 Brain 提供任何读取接口** | 未实现 |
 | `adapter-sdk` | 适配器协议、可信信封、来源鉴别、重试与限流契约 | 不含具体平台实现；不持有状态 | 未实现 |
 
 ## 3. 每个模块的允许依赖
 
 | 包 | 允许依赖 | 对外暴露 |
 |---|---|---|
-| `contracts` | — | 类型、Schema、常量、映射函数 |
-| `persistence` | contracts | `openStore` / `withWrite` / `migrate` / `checkpoint` |
+| `contracts` | — | 类型、Schema、常量 |
+| `persistence` | contracts | `openStore` / `withWrite` / `migrate` / `checkpoint` / 字段映射 |
 | `runtime` | contracts, persistence, attention, perception, memory-graph, activation, cognition, memory-dynamics, sleep-dream, personality, models | Persona 与 Task 接口、提案提交入口 |
 | `personality` | contracts, persistence | 情绪/关系/自叙事的读写接口 |
 | `attention` | contracts | 信封评估 → 注意判定 |
@@ -111,3 +111,19 @@
 5. 已知限制。
 
 **状态为"已实现"必须有对应测试与验收记录**，否则一律写"设计中"。
+
+## 7. 隔离门槛与模块启用顺序
+
+P1 只有单库单进程，**不具备物理隔离**（见 `TRUST-BOUNDARIES.md` §5.1）。因此以下三个模块
+虽然定义了接口，但**在门槛达成前不得启用**：
+
+| 模块 | 门槛 | 未达门槛时 |
+|---|---|---|
+| `archive-writer` | 独立 db 文件 + 独立进程 + Brain 无读权限 + 句柄审计 | 原始正文不落盘，随感知缓冲 TTL 删除 |
+| `action-gateway` | 独立进程 + 独立令牌 + 幂等持久化 + 回执校验 + 重复执行=0 测试 | 不执行任何真实外部动作 |
+| `sleep-dream`（梦境部分） | **独立进程**（非 Worker）+ 无网络/无文件写/无工具令牌 + 逃逸测试 | 梦境不启用；睡眠的记忆巩固可先做（不涉及执行权限） |
+
+**Worker Thread 只用于非安全目的的数值计算**（激活传播等），不可作为任何安全边界。
+
+对应阶段：Archive 与 Action Gateway 属 P8；梦境属 P7。在此之前，`runtime` 只装配 mock/空实现，
+且**不得**对外声称这些能力存在。

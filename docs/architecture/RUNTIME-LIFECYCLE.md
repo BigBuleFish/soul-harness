@@ -141,6 +141,69 @@ received → accepted → noticed → understood → response_committed → acte
 前注意阶段只暴露可信信封（来源、点名程度、紧急度、时间、授权、受限摘要）。
 **不得**"先让模型读完整内容，再表演没注意到"。
 
+### 7.1 原始正文的唯一进入路径
+
+```
+Adapter 提交（信封 + 正文）
+   │
+   ▼
+[1] Ingress 校验：鉴权、来源、限流、协议版本
+   │  ✗ 失败 → status=rejected（正文立即丢弃，不落任何存储）
+   ▼
+[2] 写入短暂感知缓冲（TTL，默认 60s，可配）
+   │     └── 正文此刻**只存在于**该缓冲，未进入任何长期表
+   ▼
+[3] Pre-attention 判定 → attentionOutcome
+   │     ├── ignored      → status 保持 accepted，等 TTL 到期 → expired
+   │     ├── queued       → 留在有限队列，带过期时间与反刷屏限流
+   │     ├── partially_aware / fully_aware → 进入 [4]
+   │     └── forced_control → 立即处理，可打断其他通道
+   ▼
+[4] 选择性编码判定（importance / 注意 / 情绪 / 重复 / 已有联系 / 随机探索）
+   │     ├── 不编码 → 缓冲到期即删，**不建立任何长期痕迹**
+   │     └── 编码   → 进入 [5]
+   ▼
+[5] Archive 写入原始记录（**门槛未达时跳过**，见 TRUST-BOUNDARIES §5.2）
+   │     ├── 成功 → events.archive_ref 写入不透明引用
+   │     └── 失败 → 见 §7.2
+   ▼
+[6] 产生主观记忆提案 → 提交器 → 记忆节点（加密片段）
+   ▼
+[7] 事件 status 推进（understood / response_committed / acted）
+```
+
+**硬约束**
+
+1. 正文**只能**存在于 [2] 的 TTL 缓冲，以及 [6] 之后编码出的**密文片段**。
+2. `events`、`tasks.payload_json`、`runtime_state.checkpoint_json`、日志**一律不得**成为原文旁路。
+   字段级禁令见 `DATA-MODEL.md` §3.1。
+3. 感知缓冲到期即删；**不得**用"长期索引"偷偷保留未编码原文。
+4. 内存在缓冲期内属于敏感数据：不得写交换文件、不得进崩溃转储（部署要求）。
+
+### 7.2 Archive 不可用 / 写入失败
+
+| 情形 | 处理 |
+|---|---|
+| 门槛未达（P1–P2） | **不启用 Archive**。原始正文随感知缓冲 TTL 到期即删；`events.archive_ref` 留空。此时只允许"不产生审计承诺"的功能 |
+| 写入瞬时失败 | 有界重试（默认 3 次，指数退避）。重试期间正文留在缓冲内，**不复制到 events** |
+| 重试耗尽 | 丢弃正文，`events.status = rejected`（原因码 `archive_unavailable`）或 `expired`。**不得**降级为"存进 events 再说" |
+| Archive 长时间不可用 | 停止接收需要持久审计的刺激源（Adapter 侧收到 503），而不是收下却记不住 |
+| 恢复后 | 不追补、不重放历史正文。新刺激按新规则处理 |
+
+**不允许的"聪明做法"**：把正文暂存到 `tasks.payload_json` 等它恢复；写临时文件；压进日志。
+
+### 7.3 队列溢出与事件重试
+
+| 情形 | 处理 |
+|---|---|
+| 同一会话队列满 | 新事件 `status = expired`（`queue_overflow`）；对适配器回 429，**不静默丢弃** |
+| 事件超过 TTL 仍未注意 | `status = expired`；缓冲删除 |
+| 适配器重投同一 `eventId` | 按 `eventId` 幂等：已存在则不重复处理，返回已有状态 |
+| 处理失败（非 Archive） | 有限重试（默认 3 次），超限 `status = rejected`；记录原因码，不进主观记忆 |
+| 迟到事件（`occurred_at` 远早于 `received_at`） | 允许处理，但 `subjective_time` 必须用 `occurred_at` 与接收时间共同表达，不得伪装成"刚刚发生" |
+
+所有队列必须**有限、可过期、带反刷屏限流**。
+
 ## 8. 睡眠与唤醒
 
 ```

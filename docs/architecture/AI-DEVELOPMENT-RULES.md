@@ -34,7 +34,7 @@
 
 | 层 | 选定 | 不得更换为 |
 |---|---|---|
-| 运行时 | **Node.js 24.x LTS**（本机 24.14.1 / 24.21.0） | 26.x 或更早版本 |
+| 运行时 | **Node.js 24 LTS**，`>=24.15.0 <25`，精确版本以实测锁定 | 26.x 或更早；小版本升级需说明理由 |
 | 语言 | TypeScript（strict） | 纯 JS、Rust |
 | 包管理 | pnpm | npm、yarn |
 | 构建 | Turborepo | nx、自研脚本 |
@@ -97,7 +97,7 @@
 ## 7. 代码规范
 
 - TypeScript `strict: true`；禁止 `any`（`unknown` + 类型收窄代替）；禁止 `@ts-ignore`（用 `@ts-expect-error` 并附原因）。
-- 线协议字段 camelCase，DB 列 snake_case，转换只走 `contracts` 的映射层。
+- 线协议字段 camelCase，DB 列 snake_case；**转换只在 `packages/persistence` 做**，其他模块不得自行转字段名。
 - 状态、通道、关系、节点类型用**枚举常量**，禁止散落字符串字面量。
 - 所有时间用 Unix 毫秒整数；禁止在包里格式化给人看的时间。
 - 注释写**英文**，说明"为什么"而不是"做了什么"。文件头写清该文件的核心约束。

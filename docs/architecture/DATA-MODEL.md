@@ -16,7 +16,8 @@
 | 索引 | `ix_<表>_<列…>` | `ix_nodes_persona_lifecycle` |
 | 迁移文件 | `NNNN_<snake_desc>.sql` | `0001_init_core.sql` |
 
-**camelCase ↔ snake_case 的映射由 `packages/contracts` 的映射层统一完成，禁止各模块自己转换。**
+**camelCase ↔ snake_case 的映射由 `packages/persistence` 统一完成，禁止各模块自己转换。**
+`contracts` 只定义协议类型与 JSON Schema，**不知道**数据库列名。
 转换规则固定为纯机械转换（`personaId` ⇄ `persona_id`），不做任何特例，以便推断与测试。
 
 时间字段一律 **Unix 毫秒整数**（`INTEGER`），不用字符串时间戳。需要人读时在边缘层格式化。
@@ -35,6 +36,13 @@ Markdown 投影（SOUL.md / IDENTITY.md / MEMORY.md …）
 - 外部编辑 Markdown 后**必须**经 Schema、版本、权限校验后导入；校验失败则整体拒绝，不部分导入。
 - **禁止双主写入。** 不允许"文件改了也算真"。
 - 人格可自行改写的内容（自我叙事、偏好、关系）与**永不允许人格改写**的内容（密钥、授权策略、归档保留策略）必须分开存放，后者不进入任何可写投影。
+
+### 2.1 P1 存储形态（与隔离边界）
+
+- P1 使用**一个 SQLite 文件**，三域数据同库同进程，**不具备物理隔离**（见 `TRUST-BOUNDARIES.md` §5.1）。
+- 逻辑隔离靠两点：**表归属唯一**（每张表只属于一个模块，见 `MODULES.md`）与**接口边界**（跨模块只能走公开接口）。
+- 物理隔离（独立 Archive db 文件、独立权限、独立进程）的启用门槛见 `PLAN.md` §6.2。
+  **在门槛达成前，`archive_records` 表虽然定义了，但不得落盘原始正文**（见 §3.1）。
 
 ## 3. 首期表（P1，只实现这 6 张）
 
@@ -75,6 +83,9 @@ CREATE TABLE events (
   status         TEXT NOT NULL CHECK (status IN
                    ('received','accepted','noticed','understood',
                     'response_committed','acted','rejected','expired')),
+  -- 注意判定结果，与 status 是两个不同维度（见 §3.2）
+  attention_outcome TEXT CHECK (attention_outcome IN
+                   ('not_evaluated','ignored','queued','partially_aware','fully_aware','forced_control')),
   salience       REAL NOT NULL DEFAULT 0,
   summary        TEXT,                     -- 受限摘要，非原文
   archive_ref    TEXT,                     -- 指向 Sealed Archive 的不透明引用
@@ -121,8 +132,43 @@ CREATE TABLE schema_migrations (
 );
 ```
 
-**关键取舍：`events` 不存正文。** 原始文本进 Archive，本表只留信封 + 受限摘要 + 不透明引用。
+**关键取舍：`events` 不存正文。** 本表只留信封 + 受限摘要 + 不透明引用。
 理由：正文一旦在 Reliable World 留一份，就会出现"第二份真相"，遗忘、审计与隐私全部失效。
+
+### 3.1 原文旁路禁令（各字段的具体约束）
+
+原始正文只允许存在于**短暂感知缓冲**（TTL）以及其后**编码出的主观记忆密文片段**。
+以下位置**一律不得**成为永久原文储存的旁路：
+
+| 位置 | 允许存什么 | 明确禁止 |
+|---|---|---|
+| `events.summary` | 受限摘要（长度上限由 Schema 定，默认 ≤ 200 字符），是**解释结果**不是原文 | 原始消息全文、原文拼接、可还原原文的编码 |
+| `events.archive_ref` | 不透明引用（ID 或哈希），**不是路径** | 文件路径、可直接读取的 URI、SQL 片段 |
+| `tasks.payload_json` | **只放引用**：`eventId` / `nodeId` / `threadId` / 参数枚举 | 任何原文、上下文正文、模型输入原文 |
+| `runtime_state.checkpoint_json` | 游标、队列位置、版本号、活跃 ID 列表 | 任何正文、对话片段、思维内容 |
+| 日志 / 遥测 | 计数、耗时、错误码、ID | 默认不记录原文；确需时须脱敏并显式开关 |
+| `sessions.meta_json` | 适配器侧标识与配置 | 会话消息内容 |
+
+**这条是硬约束。** 违反它会让整条遗忘链失效：删了主观记忆，原文还在 `events` 或检查点里躺着。
+
+判据（可自动化）：注入带唯一标记的刺激后，遍历全部库表、索引、检查点与日志，标记串不得出现在上表"明确禁止"的列中。
+
+### 3.2 `attentionOutcome` 与 `event.status` 是两件事
+
+| 维度 | 含义 | 取值 | 谁负责 |
+|---|---|---|---|
+| `event.status` | 事件在**持久管线**中的阶段 | `received` / `accepted` / `noticed` / `understood` / `response_committed` / `acted` / `rejected` / `expired` | `runtime`（提交器） |
+| `attentionOutcome` | 注意机制对这条刺激**单次判定**的结果 | `not_evaluated` / `ignored` / `queued` / `partially_aware` / `fully_aware` / `forced_control` | `attention` |
+
+规则：
+
+1. `ignored` / `queued` 是**注意结果**，不是事件终态。被忽略的事件其 `status` 仍可能是 `accepted`，
+   直到队列超时或 TTL 到期才转 `expired`。
+2. `force_control` 必须导致 `status` 立即进入终态（`rejected` 或由控制路径直接处理），不受排队影响。
+3. 同一事件可以被**多次**注意判定（例如先 `queued` 后 `fully_aware`），因此
+   `attention_outcome` 记录**最近一次**判定；完整历史写入审计流，不进主观回忆。
+4. 事件进入模型解释的前提是 `attentionOutcome ∈ {partially_aware, fully_aware, forced_control}`。
+   **不得**让模型先读全文再表演"没注意到"。
 
 ## 4. 二期表（P3–P5：记忆网络与思维）
 
@@ -201,9 +247,30 @@ CREATE TABLE thought_threads (
 );
 CREATE INDEX ix_threads_persona_state ON thought_threads (persona_id, state, priority DESC);
 
--- 词法索引：内容随主体一起删（见遗忘流程）
+-- 词法索引。⚠ 默认明文，可遗忘内容不得直接进入常驻索引（见下方 §4.1）
 CREATE VIRTUAL TABLE memory_fts USING fts5(node_id UNINDEXED, body, tokenize = 'unicode61');
 ```
+
+### 4.1 FTS 明文与真实遗忘的冲突（OPEN）
+
+SQLite FTS5 的索引内容默认是**明文**，`node:sqlite` 无法对索引加密。
+"删掉正文、留下索引"等于什么都没删——搜一次就能把已遗忘的内容捞回来。
+
+三个候选方案，**P3 前必须定一个**：
+
+| 方案 | 做法 | 代价 |
+|---|---|---|
+| A. 分层索引 | 可遗忘内容**不进**常驻 FTS；检索时从解密正文临时构建内存索引，用完即弃 | 检索慢，内存占用高 |
+| B. 只索引标签 | 索引里只放概念 ID / 主题标签，不放原文片段 | 丧失词法召回能力 |
+| C. 接受约束 | 常驻 FTS 只服务"明确不允许遗忘"的内容（能力文档、技能） | 记忆检索全靠向量 + 图 |
+
+当前默认倾向 **A**，但需 P3 基准测试后定案。**在定案前，禁止实现"常驻明文 FTS + 可遗忘内容"的组合。**
+
+相关硬要求（详见 `TRUST-BOUNDARIES.md` §10）：
+
+- `PRAGMA secure_delete = ON`，否则删行不从磁盘抹除。
+- 遗忘事务结束必须 `PRAGMA wal_checkpoint(TRUNCATE)`。
+- 删除后必须在库文件与 `-wal` 中搜索金丝雀，命中数须为 0。
 
 **节点类型与关系类型是开放注册表**，新增类型只需注册，不需要改表结构。
 
