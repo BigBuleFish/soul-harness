@@ -528,10 +528,11 @@ CREATE TABLE archive_conflict_records (
   event_id      TEXT NOT NULL,           -- 被冲突的原事件
   detected_at   INTEGER NOT NULL,
   source        TEXT NOT NULL
-                CHECK (length(source) BETWEEN 1 AND 64),        -- 受控标识符，非自由文本
-  adapter_id    TEXT
-                CHECK (adapter_id IS NULL OR length(adapter_id) BETWEEN 1 AND 64),
-  request_nonce TEXT NOT NULL,           -- 适配器给的不透明投递标识（非内容派生），幂等键成分
+                CHECK (length(source) BETWEEN 1 AND 64),
+  adapter_id    TEXT NOT NULL
+                CHECK (length(adapter_id) BETWEEN 1 AND 64),
+  request_nonce TEXT NOT NULL
+                CHECK (length(request_nonce) BETWEEN 16 AND 64),
   original_status TEXT NOT NULL,         -- 冲突被发现时原事件所处的 status（快照）
   original_archive_state TEXT,           -- 同上，archive_state 快照
   resolution    TEXT NOT NULL DEFAULT 'open'
@@ -539,7 +540,7 @@ CREATE TABLE archive_conflict_records (
   expires_at    INTEGER NOT NULL
 );
 CREATE INDEX ix_conflict_event ON archive_conflict_records (event_id, detected_at);
--- 幂等键：同一次投递的内部重试不得产生第二条；不同投递（不同 nonce）分别记录。
+-- 幂等键：四字段全部 NOT NULL；同一次投递的内部重试不得产生第二条。
 CREATE UNIQUE INDEX ux_conflict_delivery
   ON archive_conflict_records (event_id, adapter_id, source, request_nonce);
 ```
@@ -620,28 +621,59 @@ CREATE UNIQUE INDEX ux_conflict_delivery
 - 原文长度、字符数、token 数；
 - 解密后的任何片段。
 
-**允许字段**（即上文 DDL）：冲突 ID、`eventId`、检测时间、来源、适配器、原事件状态快照、处置状态、过期时间。
+**允许字段**（即上文 DDL）：冲突 ID、`eventId`、检测时间、`source`、`adapter_id`、
+**`request_nonce`（投递标识，非内容派生值）**、原事件状态快照、处置状态、过期时间。
 
 > 指纹比对发生在 Archive Writer 内部；它只回一个 `conflict` 结果码，不回指纹本身。
 
 **幂等规则（不依赖内容）**
 
-1. **幂等键 = `(event_id, adapter_id, source, request_nonce)`**，由唯一索引强制。
-2. `request_nonce` 是适配器在信封里给的**不透明投递标识**，**不是**内容派生值。
-   - 同一次投递的内部重试（重连、重发、应用层重试）复用同一 nonce → `INSERT OR IGNORE` 幂等，
+1. **幂等键 = `(event_id, adapter_id, source, request_nonce)`**，四字段**全部 NOT NULL**，由唯一索引强制。
+2. `request_nonce` 是适配器在信封里给的**不透明投递标识**，**不是**内容派生值，也**不是**事件内容的一部分。
+   - 同一次投递的内部重试（重连、重发、应用层重试）**必须复用**同一 nonce → `INSERT OR IGNORE` 幂等，
      **不产生第二条记录**。
-   - 不同的真实重投请求 → 不同 nonce → **分别记录**（这是期望行为，不是重复）。
-3. **禁止**用正文哈希、内容指纹、长度、字符数等**内容派生值**来充当幂等键或去重依据。
-   用内容做去重等于把原文特征长期留存，前后矛盾。
-4. **适配器未提供 `request_nonce` 时**：Ingress 拒绝该信封（`schema_invalid`），
-   不允许系统自己"编一个"或退回按内容去重。
+   - 不同的**逻辑投递** → **必须不同** nonce → 分别记录（这是期望行为，不是重复）。
+3. **禁止**用正文哈希、内容指纹、长度、字符数等**内容派生值**充当幂等键或去重依据。
+   用内容去重等于把原文特征长期留存，与"不留原文"自相矛盾。
+4. **不得为了检测 nonce 重用而保存**正文哈希、内容指纹或其他内容派生值。
+   nonce 重用由唯一索引自然发现（同键插入被忽略），**不需要也不允许**额外的内容比对。
+5. **适配器未提供 `request_nonce` 时**：Ingress 拒绝该信封（`schema_invalid`），
+   不允许系统自己"编一个"，也不允许退回按内容去重。
 
-**标识符约束**
+**`request_nonce` 的生成与绑定规则**
 
-- `source` / `adapter_id` 必须是**受控标识符**：来自适配器注册表或 Schema 中的枚举值，
-  形如 `^[a-z0-9._-]{1,64}$`（小写、点分）。
-- **不得**接收自由文本、正文片段、错误消息、用户昵称、URL 或文件路径。
-- Ingress 校验不通过的标识符 → 拒绝该请求（`schema_invalid`），不写审计。
+| 规则 | 要求 |
+|---|---|
+| 粒度 | **每次逻辑投递生成一个** |
+| 内部重试 | **必须复用**同一个 nonce（重连、超时重发、应用层重试都算同一次投递） |
+| 不同投递 | **必须使用不同 nonce**（哪怕是同一条消息、同一 eventId） |
+| 随机性 | 必须由密码学随机源生成，具备足够熵（建议 ≥ 96 bit） |
+| 禁止派生 | **禁止**从正文、正文哈希、内容指纹、递增计数、时间戳单值等可预测来源派生 |
+| 身份绑定 | nonce 必须绑定**已认证的 adapter 身份**：nonce 与 `adapter_id` 一起构成投递身份，<br>跨适配器复用同一 nonce 不得被视为同一次投递 |
+| 主动复用 | **不得主动复用**已使用过的 nonce（不做 nonce 池、不做回滚复用） |
+
+**信封 Schema 中的规定**（细节见 `RUNTIME-LIFECYCLE.md` §7.1 的信封字段表）
+
+- 类型：字符串；格式：`^[A-Za-z0-9_-]{16,64}$`（base64url / UUID 类无填充字符）；
+- 长度上限 64 字符，下限 16 字符；
+- 必填，缺失即 `schema_invalid`；
+- 由 **`contracts` 的 JSON Schema** 声明，接收入口执行校验。
+
+**标识符约束与职责分工**
+
+> 长度 `CHECK` **只保证非空与长度合理**，它**不是**正则校验。不要声称 DDL 已执行完整格式验证。
+
+| 层 | 负责什么 | 不负责什么 |
+|---|---|---|
+| **Ingress Schema（`contracts`）** | 完整字符集与格式校验：`^[a-z0-9._-]{1,64}$`；长度、必填、类型 | 不判断该标识符是否真实注册 |
+| **数据库 DDL** | `NOT NULL`、长度区间、枚举取值、唯一索引 | **不**做正则匹配、不**做**注册校验 |
+| **注册表（配置）** | `adapter_id` / `source` 是否为**合法且已注册**的标识符；未知标识符一律拒绝 | 不做格式解析（假定 Schema 已过） |
+
+**四级校验顺序**：Schema 格式 → 注册表存在性 → 鉴权（该适配器是否有权投递该 source）→ 落库。
+
+- **内部来源**（sleep / dream / inner 等系统通道）**必须**使用正式受控的 `adapter_id`
+  （例如 `system.sleep`），**不允许**用 `NULL` 表示"内部"。
+- **不得**接收自由文本、正文片段、错误消息、用户昵称、URL 或文件路径作为标识符。
 
 **写入失败语义**
 

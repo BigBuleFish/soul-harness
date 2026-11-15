@@ -149,6 +149,22 @@ received → accepted → noticed → understood → response_committed → acte
 
 "完整审计"**只**覆盖 `required` 范围。`excluded` 事件不被纳入完整审计承诺。
 
+**信封必填字段**（Schema 由 `packages/contracts` 声明，Ingress 执行校验）
+
+| 字段 | 类型 / 格式 | 约束 |
+|---|---|---|
+| `schema` | 常量 `soul.stimulus.v1` | 版本协商 |
+| `eventId` | 字符串 | 由适配器分配，**同一刺激重试必须复用** |
+| **`requestNonce`** | 字符串，`^[A-Za-z0-9_-]{16,64}$` | **必填**；每次**逻辑投递**一个；同一次投递的内部重试**必须复用**；不得由正文/哈希/计数派生；必须与已认证 `adapterId` 绑定 |
+| `adapterId` | 受控标识符 `^[a-z0-9._-]{1,64}$` | 必须已在注册表登记；**内部来源也用正式 ID（如 `system.sleep`），不得为 NULL** |
+| `source` | 受控标识符，同上 | 必须在注册表登记；须与 `adapterId` 的授权范围一致 |
+| `personaId` | 字符串 | 显式指定，禁止"猜最近会话" |
+| `receivedAt` / `occurredAt` | Unix ms | `occurredAt` 可缺省 |
+| `payload` | 对象 | 正文，仅在感知缓冲中存在 |
+
+> `requestNonce` 是**投递身份**的一部分，不是内容的一部分：它与 `adapterId`、`eventId`、`source`
+> 一起构成冲突审计的幂等键（`DATA-MODEL.md` §5.3）。**不得**为了检测 nonce 重用而保存内容或内容哈希。
+
 ```
 Adapter 提交（信封 + 正文）
    │
