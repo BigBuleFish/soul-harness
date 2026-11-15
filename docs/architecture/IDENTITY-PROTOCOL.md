@@ -13,7 +13,9 @@
 2. ID 是**身份**，不是**凭据**：拿到 ID 不代表有权限（见 §8）。
 3. ID **不含语义**：不得从 ID 反推时间以外的信息（序号、用户、内容、权限）。
 4. 一个 ID 一旦分配，**永不复用**，也永不改指向。
-5. 所有记录引用 ID 时**必须**带 `personaId` 作为作用域（见 §6）。
+5. **所有记录必须带 `personaId` 作为作用域**，包括审计表（`archive_decisions`、`archive_conflict_records`）。
+   作用域不是可选的过滤条件，而是隔离边界：任何按 ID 查询都必须同时带 `personaId`，
+   否则视为跨人格访问。**唯一例外**是 `personas` 表自身与其直接附属的密钥/统计表。
 
 ## 2. 六类 ID 总表
 
@@ -86,14 +88,16 @@
 ### 4.2 sessionId
 
 - **语义**：某个适配器上的一段交互窗口。**不代表人格身份**。
-- **生成**：Ingress 首次见到该 `(adapterId, externalSessionRef)` 时分配；之后同一组合复用同一 `sessionId`。
+- **生成**：Ingress 首次见到该 `(personaId, adapterId, externalSessionRef)` 时分配；之后同一组合复用同一 `sessionId`。
+  - 映射**以 `personaId` 为作用域**：同一适配器、同一 `externalSessionRef` 在不同人格下是**不同的会话**。
+  - 唯一索引：`(persona_id, adapter_id, external_id)`（`external_id` 为 NULL 时不参与）。
 - **外部可见性**：Adapter 提供 `externalSessionRef`（它自己的会话标识），**不是** `sessionId`。
 - **关闭**：`sessions.closed_at` 置位；关闭后不再接受新事件，但历史事件仍引用它。
 - **重开**：同一 `externalSessionRef` 重新出现 → **新** `sessionId`（视为新窗口），不复活旧会话。
 - **不得**：用 `sessionId` 当人格主键；用 `externalSessionRef` 直接当 `sessionId`。
 
 ```json
-{ "sessionId": "ses_01JQ8Z4A6N8Q0S3U5W7Y9B1CDE", "externalSessionRef": "dsh:abc123" }
+{ "sessionId": "ses_01JQ8Z4A6N8Q0S3V5W7Y9B1CDE", "externalSessionRef": "dsh:abc123" }
 ```
 
 ### 4.3 threadId
@@ -131,7 +135,7 @@
 
 ```json
 {
-  "runId": "run_01JQ8Z6C8Q0S2U4W6Y8A0B2CEG",
+  "runId": "run_01JQ8Z6C8Q0S2T4W6Y8A0B2CEG",
   "taskId": "tsk_01JQ8Z6B7P9R1T3V5X7Z9A2BDF",
   "attemptNo": 2,
   "kind": "memory.encode",
@@ -147,13 +151,42 @@
 
 - 原因：`events.id` 是**全局主键**。若允许 Adapter 自行分配，两个 Adapter 各自用 `"1"` 就会主键冲突。
   让 Adapter 决定我们的主键，也违反"外部不得冒充内部身份"。
-- **去重键**：`(adapterId, source, adapterEventRef)` 建**唯一索引**。
+- **去重键**：`(personaId, adapterId, source, adapterEventRef)` 建**唯一索引**。
   - 同一 Adapter 对同一刺激重试 → 同一 `adapterEventRef` → **映射到同一 `eventId`**，返回既有状态，不新建事件行。
   - 不同 Adapter 用相同字符串 → `adapterId` 不同 → 不冲突。
-- **顺序**：Schema 校验通过 → 计算去重键 → 命中则返回既有 `eventId`；未命中则**分配新 `eventId`** 并写 pending/事件行。
+  - **不同人格用相同字符串 → `personaId` 不同 → 视为两条不同的事件**（人格之间不共享事件身份）。
+- **顺序**：Schema 校验通过 → 计算去重键 → 命中则进入 §4.5.1 的正文核对 → 未命中则**分配新 `eventId`** 并写 pending/事件行。
 - **返回**：`eventId` 通过 ACK 响应回给 Adapter；Adapter 后续以 `adapterEventRef` 重试，不需要也不应该保存我们的 `eventId`。
 - **不得**：把 `requestNonce` 当 `eventId`（前者是"这次投递"，后者是"这个观察"）；
   把 `adapterEventRef` 直接塞进 `events.id`。
+
+### 4.5.1 去重命中后的正文核对（及保证边界）
+
+命中去重键只说明"这是同一个观察"，**不说明正文一致**。必须单独核对，且**不是所有形态都能核对**。
+
+**核对路径（按事件形态分）**
+
+| 原事件形态 | 能否核对正文 | 路径 | 结果 |
+|---|---|---|---|
+| `required` 且 `archive_state='archived'` | **能** | 调 Archive Writer 的 `archive.compare(eventId, 新正文)`：在其内部用 HMAC 指纹比对，**只回** `match` / `conflict` / `not_found`，**不回传任何内容** | `match` → 幂等命中，返回既有 `eventId` 与状态；`conflict` → **409** + 冲突审计（`RUNTIME-LIFECYCLE.md` §7.3），原事件不改 |
+| `required` 且 `archive_state='pending'` | **视情况** | 原正文若仍在感知缓冲内 → 与缓冲比对（进程内，不外泄）；缓冲已丢 → **无法核对** | 可比：`match` 幂等 / `conflict` 409。不可比：按幂等命中处理，并记 `body_unverifiable` 事件（**不含内容**） |
+| `excluded` | **不能** | 从未归档，无任何持久副本 | **只能幂等命中**：返回既有 `eventId` 与状态，新正文被丢弃。**无法发现差异，也不得声称发现了** |
+| P1（Archive 关闭） | **不能** | 无 Archive 能力，正文只在缓冲 | 同 `excluded`：只能幂等命中 |
+
+**保证边界（必须写进 API 文档与 Adapter SDK）**
+
+| 保证 | 范围 |
+|---|---|
+| "同一去重键只产生一条事件行" | **所有形态都保证** |
+| "能发现同一去重键下的正文不一致" | **仅** `required` 且 Archive 可用且已归档（或缓冲仍在）时保证 |
+| `excluded` / P1 | **不保证**发现正文差异；系统不提供"内容级去重"能力 |
+| 归档能力故障期间 | 降级为"只能幂等命中"，并在健康指标中标记 |
+
+**三条禁止**
+
+1. **不得**为了在 P1 / `excluded` 下也能比对正文而保存正文、摘要、哈希或指纹 —— 那会直接破坏原文旁路禁令。
+2. **不得**把"幂等命中"描述成"已确认是同一内容"。
+3. **不得**在 `conflict` 时改写原事件（见 `RUNTIME-LIFECYCLE.md` §7.3.2 的并发安全条件）。
 
 ```json
 {
@@ -182,12 +215,12 @@
 
 ```json
 {
-  "actionId": "act_01JQ8Z8E0S2U4W6Y8A0B2C4EGJ",
+  "actionId": "act_01JQ8Z8E0S2T4W6Y8A0B2C4EGJ",
   "personaId": "psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC",
   "actorId": "persona:psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC",
   "adapterId": "minecraft",
   "intentVersion": 3,
-  "idempotencyKey": "act_01JQ8Z8E0S2U4W6Y8A0B2C4EGJ",
+  "idempotencyKey": "act_01JQ8Z8E0S2T4W6Y8A0B2C4EGJ",
   "state": "executing"
 }
 ```
@@ -252,7 +285,7 @@ persona (psn)
 |---|---|---|---|
 | **身份 ID** | 这是谁 / 这是什么 | `evt_…`、`act_…` | **不能** |
 | **鉴权（capability / token）** | 你有权做什么 | adapter token、scope | 是 |
-| **幂等键** | 同一操作如何只生效一次 | `actionId`、`(adapterId, source, adapterEventRef)`、`(eventId, adapterId, source, requestNonce)` | 否（只是去重） |
+| **幂等键** | 同一操作如何只生效一次 | `actionId`、`(personaId, adapterId, source, adapterEventRef)`、`(eventId, adapterId, source, requestNonce)` | 否（只是去重） |
 | **requestNonce** | 这是**同一次投递**吗 | `^[A-Za-z0-9_-]{16,64}$` | 否 |
 
 **三条禁止**
@@ -277,35 +310,61 @@ persona (psn)
 | `events` | `id` | eventId | **需改**（见 §9.2） |
 | `action_records` | `action_id` | actionId | 兼容 |
 
-### 9.2 必须的数据模型修正：`events` 主键冲突消解
+### 9.2 必须的数据模型修正
 
-`events.id` 是全局主键，而 Adapter 只提供 `adapterEventRef`。为此 `events` 增加两列并建唯一索引：
+**(a) `events` 主键冲突消解**
+
+`events.id` 是全局主键，而 Adapter 只提供 `adapterEventRef`。为此 `events` 增加两列并建**带 persona 作用域**的唯一索引：
 
 ```sql
 adapter_id        TEXT NOT NULL,   -- 来源适配器（内部来源用 system.* 正式 ID）
 adapter_event_ref TEXT NOT NULL,   -- 适配器侧的刺激标识，重试复用
 CREATE UNIQUE INDEX ux_events_dedupe
-  ON events (adapter_id, source, adapter_event_ref);
+  ON events (persona_id, adapter_id, source, adapter_event_ref);
 ```
 
 - `events.id` **只由 Ingress 生成**（`evt_` 前缀）。
-- 去重键命中 → 直接返回既有 `eventId`，不新增事件行。
+- 去重键命中 → 进入 §4.5.1 的正文核对；核对为 `match` 或无法核对时返回既有 `eventId`，**不新增事件行**。
+- 去重键**必须含 `persona_id`**：两个 persona 各自收到 `adapterEventRef='mc-1'` 是两条独立事件。
 - `adapter_event_ref` 是**外部引用**，允许适配器自定义格式（仍受长度/字符集约束），
   但它**不是**内部身份，不参与任何权限判断。
+
+**(b) `sessions` 映射的作用域**
+
+```sql
+CREATE UNIQUE INDEX ux_sessions_external
+  ON sessions (persona_id, adapter_id, external_id)
+  WHERE external_id IS NOT NULL;
+```
+
+- 同一适配器、同一 `externalSessionRef` 在不同 persona 下是**不同会话**。
+- `external_id` 为 NULL 时不参与唯一性（内部来源可不带外部引用）。
+
+**(c) 审计表补 `persona_id`**
+
+`archive_decisions` 与 `archive_conflict_records` 增加 `persona_id TEXT NOT NULL`；
+`archive_records.persona_id` 由可空改为 `NOT NULL`。
+
+- 理由：§1 总则要求所有记录带 persona 作用域，审计表也不能例外 ——
+  否则"按人格隔离审计"只能靠 `event_id` 反查，跨人格排查会被牵连。
+- 审计表仍**不存任何内容**，`persona_id` 只是一个不透明标识。
+- 冲突审计的唯一索引保持不变（`event_id` 已隐含 persona），`persona_id` 用于查询与隔离。
 
 ### 9.3 对现有文档的同步（SH-003 已执行）
 
 | # | 文档 | 变更 | 状态 |
 |---|---|---|---|
 | 1 | `RUNTIME-LIFECYCLE.md` §7.1 | 信封字段表：`eventId` 改为 `adapterEventRef`；`eventId` 改为 ACK 返回值 | **已同步** |
-| 2 | `RUNTIME-LIFECYCLE.md` §7.3 | 幂等条目新增"去重入口是 `adapterEventRef`" | **已同步** |
-| 3 | `DATA-MODEL.md` §3 | `events` 增加 `adapter_id` / `adapter_event_ref` 两列 + 去重唯一索引 | **已同步** |
-| 4 | `DATA-MODEL.md` §3.1 | 新增 `adapter_event_ref` 字段白名单行 | **已同步** |
-| 5 | `MODULES.md` | `runtime` 增加"六类 ID 分配"；`contracts` 增加"ID 格式与生成契约" | **已同步** |
-| 6 | `PLAN.md` §4 / `README.md` | 文档入口指向本文 | **已同步** |
+| 2 | `RUNTIME-LIFECYCLE.md` §7.3 | 去重入口改为 `adapterEventRef`，并写明"命中后需正文核对"与 excluded/P1 的边界 | **已同步** |
+| 3 | `DATA-MODEL.md` §3 | `events` 增 `adapter_id` / `adapter_event_ref`；去重索引改为 `(persona_id, adapter_id, source, adapter_event_ref)` | **已同步** |
+| 4 | `DATA-MODEL.md` §3 | `sessions` 增 `ux_sessions_external (persona_id, adapter_id, external_id)` | **已同步** |
+| 5 | `DATA-MODEL.md` §3.1 | 新增 `adapter_event_ref` 字段白名单行 | **已同步** |
+| 6 | `DATA-MODEL.md` §5 | `archive_decisions` / `archive_conflict_records` 增 `persona_id NOT NULL`；`archive_records.persona_id` 改 NOT NULL | **已同步** |
+| 7 | `MODULES.md` | `runtime` 增"六类 ID 分配"；`contracts` 增"ID 格式与生成契约"；`archive-writer` 增 `compare` 接口 | **已同步** |
+| 8 | `PLAN.md` §4 / `README.md` | 文档入口指向本文 | **已同步** |
 
-**尚未同步、需要后续处理**：`sessions.external_id` 的语义（`externalSessionRef`）目前只在本文 §4.2 说明，
-`DATA-MODEL.md` 的注释仍是旧措辞。这是措辞级差异，不影响结构；留到 P1 实现该表时一并更新。
+**尚未同步、需要后续处理**：`sessions.external_id` 的语义（`externalSessionRef`）在 `DATA-MODEL.md` 的注释仍是旧措辞。
+这是措辞级差异，不影响结构；留到 P1 实现该表时一并更新。
 
 ## 10. 正例 / 反例 / 边界
 
@@ -321,7 +380,7 @@ CREATE UNIQUE INDEX ux_events_dedupe
 → 200 { "eventId": "evt_01JQ8Z7D9R1T3V5X7Z9A1B3DFH", "status": "accepted" }
 
 // 3. 重试一次模型调用 → 新 runId，同 taskId
-{ "taskId": "tsk_01JQ8Z6B7P9R1T3V5X7Z9A2BDF", "attemptNo": 2, "runId": "run_01JQ8Z6C8Q0S2U4W6Y8A0B2CEG" }
+{ "taskId": "tsk_01JQ8Z6B7P9R1T3V5X7Z9A2BDF", "attemptNo": 2, "runId": "run_01JQ8Z6C8Q0S2T4W6Y8A0B2CEG" }
 ```
 
 ### 反例
@@ -341,8 +400,9 @@ CREATE UNIQUE INDEX ux_events_dedupe
 
 | 边界情况 | 处理 |
 |---|---|
-| 同一 `adapterEventRef`、不同正文 | 归档冲突路径：409 + 冲突审计，**不改写原事件**（`RUNTIME-LIFECYCLE.md` §7.3.2） |
+| 同一 `adapterEventRef`、不同正文 | `required` 且已归档 → `archive.compare` 得 `conflict` → 409 + 冲突审计，**不改写原事件**（`RUNTIME-LIFECYCLE.md` §7.3.2）；`excluded`/P1 → **无法发现**，只能幂等命中 |
 | 同一 `externalSessionRef` 断开后重连 | **新 `sessionId`**，不复活旧窗口 |
+| 同一 `adapterEventRef` 发往**不同 persona** | 视为两条独立事件（去重键含 `personaId`），互不影响 |
 | 线程恢复后又中断 | 同 `threadId`；每次模型调用仍产生新 `runId` |
 | 动作执行中进程崩溃 | 按 `actionId` 向适配器对账；无回执不标成功 |
 | 动作超时但适配器实际成功 | 以真实回执为准；`actionId` 不变，状态由回执更新 |
@@ -369,8 +429,8 @@ CREATE UNIQUE INDEX ux_events_dedupe
 |---|---|---|
 | I01 | 六类 ID 格式符合 §3.1 正则，长度恒为 30 | 未实现 |
 | I02 | 所有 ID 由 Harness 生成；Adapter 提交内部 ID 一律拒绝 | 未实现 |
-| I03 | 相同 `(adapterId, source, adapterEventRef)` 重投返回同一 `eventId` | 未实现 |
-| I04 | 不同 Adapter 使用相同 `adapterEventRef` 不冲突 | 未实现 |
+| I03 | 相同 `(personaId, adapterId, source, adapterEventRef)` 重投返回同一 `eventId` | 未实现 |
+| I04 | 不同 Adapter 或不同 persona 使用相同 `adapterEventRef` 不冲突 | 未实现 |
 | I05 | 每次重试产生新 `runId`，`taskId` 不变，`attemptNo` 递增 | 未实现 |
 | I06 | 同一意图的所有重试复用同一 `actionId` | 未实现 |
 | I07 | 无 `actionId` 或 `actionId` 不匹配的回执被拒绝 | 未实现 |
@@ -379,6 +439,9 @@ CREATE UNIQUE INDEX ux_events_dedupe
 | I10 | `requestNonce` 与 `eventId` 在任何路径上不可互换 | 未实现 |
 | I11 | ID 中不含可推断内容的信息（仅时间前缀） | 未实现 |
 | I12 | 数据库唯一索引能捕获生成器碰撞并报错而非覆盖 | 未实现 |
+| I13 | `required` 事件同键异内容能被 `archive.compare` 判为 `conflict` | 未实现 |
+| I14 | `excluded` / P1 下同键异内容**不被谎报为已识别**（只幂等命中） | 未实现 |
+| I15 | 审计表（`archive_decisions` / `archive_conflict_records`）均带 `persona_id`，可按人格隔离查询 | 未实现 |
 
 ---
 

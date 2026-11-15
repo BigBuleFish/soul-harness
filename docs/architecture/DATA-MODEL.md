@@ -74,6 +74,10 @@ CREATE TABLE sessions (
   meta_json   TEXT
 );
 CREATE INDEX ix_sessions_persona ON sessions (persona_id, opened_at DESC);
+-- 会话映射以人格为作用域：同一适配器同一外部会话在不同人格下是不同会话
+CREATE UNIQUE INDEX ux_sessions_external
+  ON sessions (persona_id, adapter_id, external_id)
+  WHERE external_id IS NOT NULL;
 
 -- 事件（Reliable World 的观察记录）
 -- 注意：本表只存信封与非内容元数据；原始正文归 Archive（加密），通过 archive_ref 指向。
@@ -120,8 +124,9 @@ CREATE TABLE events (
 );
 CREATE INDEX ix_events_persona_status ON events (persona_id, status, received_at);
 CREATE INDEX ix_events_session ON events (session_id, received_at);
--- 去重键：同一适配器、同一来源、同一刺激 → 只映射一个 eventId（见 IDENTITY-PROTOCOL §4.5）
-CREATE UNIQUE INDEX ux_events_dedupe ON events (adapter_id, source, adapter_event_ref);
+-- 去重键：同一人格、同一适配器、同一来源、同一刺激 → 只映射一个 eventId（见 IDENTITY-PROTOCOL §4.5）
+CREATE UNIQUE INDEX ux_events_dedupe
+  ON events (persona_id, adapter_id, source, adapter_event_ref);
 
 -- 任务（调度与睡眠周期共用）
 CREATE TABLE tasks (
@@ -496,7 +501,7 @@ CREATE TABLE action_records (             -- 幂等与回执
 -- 存档内容一律加密；此表只存元数据与密文引用。
 CREATE TABLE archive_records (
   event_id     TEXT PRIMARY KEY,          -- 幂等键 = eventId：重复写入不产生第二条
-  persona_id   TEXT,
+  persona_id   TEXT NOT NULL,             -- 作用域：审计/移除都必须可按人格隔离
   source       TEXT NOT NULL,
   received_at  INTEGER NOT NULL,
   occurred_at  INTEGER,
@@ -518,6 +523,7 @@ CREATE INDEX ix_archive_expiry ON archive_records (expires_at);
 -- 归属：Reliable World / 审计侧；由 Ingress 决策路径写入，不属 Archive 域。
 CREATE TABLE archive_decisions (
   event_id       TEXT PRIMARY KEY,        -- 一条事件一条决策记录
+  persona_id     TEXT NOT NULL,           -- 作用域：审计也必须可按人格隔离
   disposition    TEXT NOT NULL CHECK (disposition IN ('required','excluded')),
   policy_id      TEXT NOT NULL,           -- 策略标识
   rule_id        TEXT NOT NULL,           -- 命中规则标识
@@ -532,6 +538,7 @@ CREATE INDEX ix_decisions_policy ON archive_decisions (policy_id, policy_version
 CREATE TABLE archive_conflict_records (
   id            TEXT PRIMARY KEY,        -- 冲突事件自身 ID（**不是** eventId，不得冒充原事件）
   event_id      TEXT NOT NULL,           -- 被冲突的原事件
+  persona_id    TEXT NOT NULL,           -- 作用域：审计也必须可按人格隔离
   detected_at   INTEGER NOT NULL,
   source        TEXT NOT NULL
                 CHECK (length(source) BETWEEN 1 AND 64),
