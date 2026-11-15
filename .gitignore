@@ -1,0 +1,42 @@
+# ── 个人数据 / 备份：绝不入库 ──────────────────────────────
+# 旧人格数据备份（含主观记忆原文与 SQLite 快照）
+_backup/
+
+# 运行时数据目录（人格主观状态、密钥、档案）
+data/
+soul-data/
+sealed-archive/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# 主观内容密钥
+keys/
+*.pem
+*.key
+
+# ── 临时脚本 ────────────────────────────────────────────
+_scratch/
+
+# ── Node ────────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+.turbo/
+dist/
+build/
+*.tsbuildinfo
+
+# ── 日志与本地配置 ──────────────────────────────────────
+*.log
+.env
+.env.*
+!.env.example
+
+# ── 编辑器 / 系统 ───────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
