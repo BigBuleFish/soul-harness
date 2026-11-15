@@ -371,24 +371,6 @@ t1' 崩溃（**Archive 尚未写入**）
 **不允许的"聪明做法"**：把正文暂存到 `tasks.payload_json` 等它恢复；写临时文件；压进日志；
 重试时换 `eventId` 绕过冲突；让 Brain 直连 Archive"只读确认一下"；崩溃后用 Archive 正文重建缓冲。
 
-**冲突处理（原事件已 `accepted` 时）**
-
-```
-原事件 E（eventId=X）早已 accepted/noticed/understood/…
-Adapter 用同一 X、不同正文重投
-   │
-   ▼
-Archive append → 指纹不匹配 → 返回 conflict
-   │
-   ├─ 原事件 E：**状态不变**，一个字都不改
-   ├─ 冲突请求：**不落 events 行**（events.id 是主键，也不能冒充）
-   ├─ 响应适配器：409 archive_conflict
-   └─ 写 archive_conflict_records（独立冲突 ID，字段见 DATA-MODEL §5.3）
-```
-
-**冲突审计记录的禁止字段**：冲突正文、摘要、关键词、原文普通 SHA-256、长度/token 数、
-任何可反推内容的派生值。记录只回答"谁在什么时候对哪个 eventId 重投了异内容"。
-
 #### 7.3.1 重启后的两类扫描（必须分开）
 
 > **`failed` 不是 `pending`。** 扫描目标不同、动作不同，混用会造成永久卡死或伪造归档。
@@ -419,6 +401,52 @@ Archive append → 指纹不匹配 → 返回 conflict
 
 **启动清理顺序**：先 A 后 B（A 的 `not_found` 分支会产生新的 `failed`，B 不会再碰它，
 因为 A 已直接置为 `expired`）。两次扫描都必须有界、限速、可中断。
+
+**冲突处理（原事件已 `accepted` 时）**
+
+```
+原事件 E（eventId=X）早已 accepted/noticed/understood/…
+Adapter 用同一 X、不同正文重投
+   │
+   ▼
+Archive append → 指纹不匹配 → 返回 conflict
+   │
+   ├─ 原事件 E：**状态不变**，一个字都不改
+   ├─ 冲突请求：**不落 events 行**（events.id 是主键，也不能冒充）
+   ├─ 响应适配器：409 archive_conflict
+   └─ 写 archive_conflict_records（独立冲突 ID，字段见 DATA-MODEL §5.3）
+```
+
+**冲突审计记录的禁止字段**：冲突正文、摘要、关键词、原文普通 SHA-256、长度/token 数、
+任何可反推内容的派生值。记录只回答"谁在什么时候对哪个 eventId 重投了异内容"。
+
+#### 7.3.2 `archive_conflict` 唯一例外的并发安全
+
+例外条款允许把"原事件"转 `rejected`，但**只能在一种严格条件下**发生，否则会覆盖恢复流程的成果。
+
+**三条前置条件（缺一不可）**
+
+1. **同一写入协调器**：冲突处理与恢复提交（扫描 A / 扫描 B）必须走同一个 persona 级单写入者，
+   **不得**跨线程/跨进程并行写同一个 `eventId`。
+2. **短事务内二次确认**：在决定转换的同一个短事务里**重新读取**该行并确认：
+   ```
+   status = 'received' AND archive_state = 'pending'
+   ```
+   只有条件成立才允许 `UPDATE … SET status='rejected', status_reason='archive_conflict'`。
+3. **条件更新（CAS）**：`UPDATE … WHERE id=? AND status='received' AND archive_state='pending'`；
+   受影响行数为 0 → 说明状态已变，**不得重试盲写**。
+
+**状态已变化时怎么办**
+
+| 事务内读到的实际状态 | 处理 |
+|---|---|
+| `received` + `pending` | 允许转 `rejected`（`archive_conflict`） |
+| 已被扫描 A 补提交为 `accepted` | **按当前状态重新决策**：原事件已归档成功，冲突请求只走 409 + 审计，**原事件不动** |
+| 已被扫描 B 转 `expired` | 原事件已是终态，**不得改写**；只 409 + 审计 |
+| 其它任何状态 | 一律不改原事件 |
+
+**绝对禁止**：冲突处理覆盖恢复流程已提交的 `accepted`；
+以"先读后写"的方式凭一次早前读取做判断；在事务外用普通 `UPDATE` 覆盖状态。
 
 ### 7.4 ACK 语义（按 disposition 区分）
 
@@ -474,7 +502,7 @@ Archive append → 指纹不匹配 → 返回 conflict
 
 - `expired`：`buffer_lost` / `ttl_expired` / `queue_overflow`；
 - `rejected`：`auth_failed` / `untrusted_source` / `schema_invalid` / `rate_limited` /
-  `archive_unavailable` / `archive_conflict`；
+  `archive_unavailable` / `archive_conflict` / `processing_failed`；
 - `understood` **只有在模型确实完成解释后**才允许出现。**崩溃恢复不得推断、不得补写 `understood`。**
 
 #### 7.6.1 `failed` 的语义（与 `expired` 严格区分）
@@ -484,7 +512,7 @@ Archive append → 指纹不匹配 → 返回 conflict
 | `archive_state='failed'` 等于事件终结吗？ | **不等于。** 它只表示"归档这次尝试失败" |
 | `failed` 会自动变 `expired` 吗？ | **不会自动。** 只有缓冲失效或 TTL 到期才转 `expired` |
 | `failed` 时能重试吗？ | **取决于缓冲是否仍有效**：有效则允许同 `eventId` 受控重试；失效则必须转 `expired` |
-| 崩溃恢复扫 `failed` 吗？ | **不扫。** 扫描对象是 `pending`；`failed` 是"等外部重试"的状态 |
+| 崩溃恢复扫 `failed` 吗？ | **分两类扫描，不要混。** 归档补提交（扫描 A）**不扫** `failed`，只扫 `pending`；缓冲生命周期清理（扫描 B）**会扫** `failed + received`，并在启动时把它们转 `expired`（`buffer_lost`）。详见 §7.3.1 |
 | `failed` 能变成成功吗？ | 只能通过**同 eventId 重新 append 成功**后走正常提交；不得直接改状态"假装修好" |
 | 缓冲丢了还能把 `failed` 补成 `archived` 吗？ | **不能。** 禁止伪造成功、禁止从 Archive 反读正文重建 |
 

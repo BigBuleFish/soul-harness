@@ -199,6 +199,8 @@ Archive 是**记录域**，不是记忆域。二者在密钥、写入者、保�
   冲突写入审计（不含内容）。Brain 侧只收到错误码。
 - **冲突重投不得改写原事件状态**：已 `accepted` 及之后的事件永不因冲突被改写为 `rejected`；
   冲突请求不落 `events` 行，只能写入独立的冲突审计（字段见 `DATA-MODEL.md` §5.3）。
+- **冲突审计写入失败不得改变响应**：仍然拒绝（409），也不得改写原事件。
+  拒绝优先于记账 —— 不能因为日志没写成而放行异内容。
 - **任何重试路径都不得放宽本节红线**：重试只能补齐提交或重新 append，不得借重试把正文写进
   `events`、不得新建 `eventId` 绕过冲突、不得从 Archive 反读正文重建缓冲。
   五种重试情形的判定表见 `RUNTIME-LIFECYCLE.md` §7.3。
@@ -243,7 +245,8 @@ Archive 是**记录域**，不是记忆域。二者在密钥、写入者、保�
 
 **明文判据**：向系统注入带唯一标记串的刺激，遍历所有库表、索引、检查点与缓存，
 该标记串**不得**出现在：`events` 任意列、`tasks.payload_json`、`runtime_state.checkpoint_json`、
-`archive_decisions` 任意列、日志、`archive_records` 的任何**非密文**列。
+`archive_decisions` 任意列、`archive_conflict_records` 任意列、日志、
+`archive_records` 的任何**非密文**列。
 
 **密文判据**：同一标记串在 `archive_records.content_enc` 中**不得**以明文形式出现
 （即该 BLOB 中搜不到标记串原文）；且用 Brain 身份无法解密该 BLOB。

@@ -527,8 +527,11 @@ CREATE TABLE archive_conflict_records (
   id            TEXT PRIMARY KEY,        -- 冲突事件自身 ID（**不是** eventId，不得冒充原事件）
   event_id      TEXT NOT NULL,           -- 被冲突的原事件
   detected_at   INTEGER NOT NULL,
-  source        TEXT NOT NULL,
-  adapter_id    TEXT,
+  source        TEXT NOT NULL
+                CHECK (length(source) BETWEEN 1 AND 64),        -- 受控标识符，非自由文本
+  adapter_id    TEXT
+                CHECK (adapter_id IS NULL OR length(adapter_id) BETWEEN 1 AND 64),
+  request_nonce TEXT NOT NULL,           -- 适配器给的不透明投递标识（非内容派生），幂等键成分
   original_status TEXT NOT NULL,         -- 冲突被发现时原事件所处的 status（快照）
   original_archive_state TEXT,           -- 同上，archive_state 快照
   resolution    TEXT NOT NULL DEFAULT 'open'
@@ -536,6 +539,9 @@ CREATE TABLE archive_conflict_records (
   expires_at    INTEGER NOT NULL
 );
 CREATE INDEX ix_conflict_event ON archive_conflict_records (event_id, detected_at);
+-- 幂等键：同一次投递的内部重试不得产生第二条；不同投递（不同 nonce）分别记录。
+CREATE UNIQUE INDEX ux_conflict_delivery
+  ON archive_conflict_records (event_id, adapter_id, source, request_nonce);
 ```
 
 ### 5.1 Archive 表字段约束（完整性、指纹、保留）
@@ -617,6 +623,36 @@ CREATE INDEX ix_conflict_event ON archive_conflict_records (event_id, detected_a
 **允许字段**（即上文 DDL）：冲突 ID、`eventId`、检测时间、来源、适配器、原事件状态快照、处置状态、过期时间。
 
 > 指纹比对发生在 Archive Writer 内部；它只回一个 `conflict` 结果码，不回指纹本身。
+
+**幂等规则（不依赖内容）**
+
+1. **幂等键 = `(event_id, adapter_id, source, request_nonce)`**，由唯一索引强制。
+2. `request_nonce` 是适配器在信封里给的**不透明投递标识**，**不是**内容派生值。
+   - 同一次投递的内部重试（重连、重发、应用层重试）复用同一 nonce → `INSERT OR IGNORE` 幂等，
+     **不产生第二条记录**。
+   - 不同的真实重投请求 → 不同 nonce → **分别记录**（这是期望行为，不是重复）。
+3. **禁止**用正文哈希、内容指纹、长度、字符数等**内容派生值**来充当幂等键或去重依据。
+   用内容做去重等于把原文特征长期留存，前后矛盾。
+4. **适配器未提供 `request_nonce` 时**：Ingress 拒绝该信封（`schema_invalid`），
+   不允许系统自己"编一个"或退回按内容去重。
+
+**标识符约束**
+
+- `source` / `adapter_id` 必须是**受控标识符**：来自适配器注册表或 Schema 中的枚举值，
+  形如 `^[a-z0-9._-]{1,64}$`（小写、点分）。
+- **不得**接收自由文本、正文片段、错误消息、用户昵称、URL 或文件路径。
+- Ingress 校验不通过的标识符 → 拒绝该请求（`schema_invalid`），不写审计。
+
+**写入失败语义**
+
+| 情况 | 处理 |
+|---|---|
+| 冲突审计写入失败 | **响应不受影响**：仍然返回 409 `archive_conflict`（拒绝优先，不能因为记账失败就接受冲突内容） |
+| 重试 | 有界重试（默认 3 次）；失败计入 `audit_gap` 指标与结构化日志（**不含内容**） |
+| 持久失败 | 上报运维，人工补录；**不得**因此改写原事件、**不得**接受冲突请求 |
+| 原事件状态 | 任何情况下**不受**本次审计写入成败影响 |
+
+**保留**：`expires_at` 到期删除；与事件记录、Archive 记录**各自独立**，不随其删除而删除。
 
 ## 6. 版本与纪元
 
