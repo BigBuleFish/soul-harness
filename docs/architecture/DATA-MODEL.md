@@ -42,7 +42,9 @@ Markdown 投影（SOUL.md / IDENTITY.md / MEMORY.md …）
 - P1 使用**一个 SQLite 文件**，三域数据同库同进程，**不具备物理隔离**（见 `TRUST-BOUNDARIES.md` §5.1）。
 - 逻辑隔离靠两点：**表归属唯一**（每张表只属于一个模块，见 `MODULES.md`）与**接口边界**（跨模块只能走公开接口）。
 - 物理隔离（独立 Archive db 文件、独立权限、独立进程）的启用门槛见 `PLAN.md` §6.2。
-  **在门槛达成前，`archive_records` 表虽然定义了，但不得落盘原始正文**（见 §3.1）。
+  **在门槛达成前，`archive_records` 表不创建**：P1 允许正常接收事件，
+  `events.archive_ref` 恒为 NULL、`archive_state = 'none'`，**系统不承诺原始事件审计能力**
+  （见 §3.1 与 `RUNTIME-LIFECYCLE.md` §7.2）。
 
 ## 3. 首期表（P1，只实现这 6 张）
 
@@ -74,7 +76,8 @@ CREATE TABLE sessions (
 CREATE INDEX ix_sessions_persona ON sessions (persona_id, opened_at DESC);
 
 -- 事件（Reliable World 的观察记录）
--- 注意：本表只存信封与受限摘要，原始正文归 Archive，通过 archive_ref 指向。
+-- 注意：本表只存信封与非内容元数据；原始正文归 Archive（加密），通过 archive_ref 指向。
+-- P1 无 Archive Writer，本表照样可用，archive_ref 恒为 NULL。
 CREATE TABLE events (
   id             TEXT PRIMARY KEY,         -- eventId
   persona_id     TEXT NOT NULL REFERENCES personas(id),
@@ -87,11 +90,14 @@ CREATE TABLE events (
   attention_outcome TEXT CHECK (attention_outcome IN
                    ('not_evaluated','ignored','queued','partially_aware','fully_aware','forced_control')),
   salience       REAL NOT NULL DEFAULT 0,
-  summary        TEXT,                     -- 受限摘要，非原文
-  archive_ref    TEXT,                     -- 指向 Sealed Archive 的不透明引用
+  summary        TEXT,                     -- ⚠ 必须为 NULL 或仅含白名单非内容元数据（见 §3.1）
+  archive_ref    TEXT,                     -- 不透明引用；P1 允许 NULL（无 Archive 时）
   received_at    INTEGER NOT NULL,
   occurred_at    INTEGER,
-  updated_at     INTEGER NOT NULL
+  updated_at     INTEGER NOT NULL,
+  -- 归档状态：与 archive_ref 分离，支持"已归档但引用未提交"的崩溃恢复
+  archive_state  TEXT NOT NULL DEFAULT 'none'
+                 CHECK (archive_state IN ('none','pending','archived','failed'))
 );
 CREATE INDEX ix_events_persona_status ON events (persona_id, status, received_at);
 CREATE INDEX ix_events_session ON events (session_id, received_at);
@@ -132,7 +138,7 @@ CREATE TABLE schema_migrations (
 );
 ```
 
-**关键取舍：`events` 不存正文。** 本表只留信封 + 受限摘要 + 不透明引用。
+**关键取舍：`events` 不存正文。** 本表只留信封 + 非内容元数据 + 不透明引用。
 理由：正文一旦在 Reliable World 留一份，就会出现"第二份真相"，遗忘、审计与隐私全部失效。
 
 ### 3.1 原文旁路禁令（各字段的具体约束）
@@ -142,12 +148,28 @@ CREATE TABLE schema_migrations (
 
 | 位置 | 允许存什么 | 明确禁止 |
 |---|---|---|
-| `events.summary` | 受限摘要（长度上限由 Schema 定，默认 ≤ 200 字符），是**解释结果**不是原文 | 原始消息全文、原文拼接、可还原原文的编码 |
-| `events.archive_ref` | 不透明引用（ID 或哈希），**不是路径** | 文件路径、可直接读取的 URI、SQL 片段 |
+| `events.summary` | **必须为 NULL**，或**仅含下表白名单中的非内容元数据** | 任何自然语言摘要、原始消息全文、原文拼接、可还原原文的编码、情感描述、主题概括 |
+| `events.archive_ref` | 不透明引用（ID 或哈希），**不是路径**；**P1 允许 NULL** | 文件路径、可直接读取的 URI、SQL 片段、密钥材料 |
+| `events.archive_state` | 枚举 `none/pending/archived/failed` | 任何原文或可推断原文的附加信息 |
 | `tasks.payload_json` | **只放引用**：`eventId` / `nodeId` / `threadId` / 参数枚举 | 任何原文、上下文正文、模型输入原文 |
 | `runtime_state.checkpoint_json` | 游标、队列位置、版本号、活跃 ID 列表 | 任何正文、对话片段、思维内容 |
 | 日志 / 遥测 | 计数、耗时、错误码、ID | 默认不记录原文；确需时须脱敏并显式开关 |
 | `sessions.meta_json` | 适配器侧标识与配置 | 会话消息内容 |
+
+**`events.summary` 白名单（严格穷举，不得扩展而不改本文件）**
+
+只允许以下非内容元数据：
+
+- 字符长度 / 字节数 / token 估算；
+- 语言标识（如 `zh`、`en`）；
+- 消息类型枚举（`text` / `image` / `sticker` / `voice` / `command`）；
+- 是否被点名的布尔标记；
+- 来源渠道名与协议版本；
+- 内容哈希（用于去重，不可逆）。
+
+**禁止**：任何"把内容说一遍"的字段——包括自然语言摘要、关键词列表、情感标签、主题命名。
+若在 P2 阶段确实需要给人看的摘要，该摘要属于**主观解释结果**，必须进入
+`memory_nodes` 的加密正文，**不得**回填 `events.summary`。
 
 **这条是硬约束。** 违反它会让整条遗忘链失效：删了主观记忆，原文还在 `events` 或检查点里躺着。
 
@@ -164,7 +186,7 @@ CREATE TABLE schema_migrations (
 
 1. `ignored` / `queued` 是**注意结果**，不是事件终态。被忽略的事件其 `status` 仍可能是 `accepted`，
    直到队列超时或 TTL 到期才转 `expired`。
-2. `force_control` 必须导致 `status` 立即进入终态（`rejected` 或由控制路径直接处理），不受排队影响。
+2. `forced_control` 必须导致 `status` 立即进入终态（`rejected` 或由控制路径直接处理），不受排队影响。
 3. 同一事件可以被**多次**注意判定（例如先 `queued` 后 `fully_aware`），因此
    `attention_outcome` 记录**最近一次**判定；完整历史写入审计流，不进主观回忆。
 4. 事件进入模型解释的前提是 `attentionOutcome ∈ {partially_aware, fully_aware, forced_control}`。
@@ -274,6 +296,33 @@ SQLite FTS5 的索引内容默认是**明文**，`node:sqlite` 无法对索引�
 
 **节点类型与关系类型是开放注册表**，新增类型只需注册，不需要改表结构。
 
+### 4.2 主观正文加密审查清单（P3 / P5 必须逐项定案）
+
+除已明确加密的列（`memory_nodes.payload_enc`、`memory_fragments.content_enc`、
+`archive_records.content_enc`）外，以下列**可能承载主观正文或私人内容**，
+在 P3（记忆）与 P5（认知）实现前必须逐项确认：加密 / 白名单限制 / 或改存引用。
+
+**P3 必须审查（记忆层）**
+
+| 列 | 风险 | 初判 |
+|---|---|---|
+| `memory_nodes.source_impression` | 主观来源印象，可能写成"我记得是他说的……" 这类带内容的叙述 | **加密**或限为枚举（`direct` / `heard` / `inferred` / `dream` / `unknown`） |
+| `memory_nodes.emotion_json` | 情绪常附带具体事由描述 | 限为数值向量 + 枚举标签；**禁止**放自由文本 |
+| `memory_nodes.subjective_time` | 主观时间可能夹带事件描述 | 限为结构化时间或模糊枚举（`today` / `recently` / `long_ago`） |
+| `memory_edges.origin_group` | 来源分组标识 | 只放不透明 ID |
+
+**P5 必须审查（认知层）**
+
+| 列 | 风险 | 初判 |
+|---|---|---|
+| `thought_threads.trigger` | 触发描述常直接引用原话（"他问我……"） | **加密**或限为枚举 + 节点 ID |
+| `thought_threads.unresolved_question` | 未解决问题本身就是一整句私人内容 | **加密** |
+| `thought_threads.focus_ids_json` | 只放 ID | 无需加密，但禁止拼入内容 |
+| `dream_sessions.fragments_json` | 醒后保留的梦境片段，本质是主观正文 | **加密**或改存为 `memory_nodes` 的 Dream 节点 |
+| `action_records.receipt_json` | 回执可能回带请求参数原文 | 只保留状态码与外部动作 ID；原文由适配器侧负责 |
+
+审查通过的结论必须回写本节。**未定案前，上述列不得以明文自由文本形式落盘。**
+
 ## 5. 三期表（P6–P8）
 
 ```sql
@@ -309,15 +358,33 @@ CREATE TABLE action_records (             -- 幂等与回执
   settled_at   INTEGER
 );
 
-CREATE TABLE archive_records (            -- 仅 Archive Writer 可写；Brain 无连接
-  id          TEXT PRIMARY KEY,
-  persona_id  TEXT,
-  source      TEXT NOT NULL,
-  raw_ref     TEXT NOT NULL,
-  received_at INTEGER NOT NULL,
-  sha256      TEXT NOT NULL
+-- Archive：独立权限域、独立密钥、独立保留策略。
+-- 该表属"记录域"，BRAIN 侧永不连接；只有 Archive Writer 进程可写。
+-- 存档内容一律加密；此表只存元数据与密文引用。
+CREATE TABLE archive_records (
+  event_id     TEXT PRIMARY KEY,          -- 幂等键 = eventId：重复写入不产生第二条
+  persona_id   TEXT,
+  source       TEXT NOT NULL,
+  received_at  INTEGER NOT NULL,
+  occurred_at  INTEGER,
+  content_enc  BLOB,                      -- 加密后的原始记录（不得明文）
+  key_id       TEXT NOT NULL,             -- Archive 专属密钥标识（与主观记忆密钥不同域）
+  content_sha256 TEXT NOT NULL,           -- 密文或明文的完整性校验（不可逆）
+  byte_len     INTEGER NOT NULL,
+  retention_class TEXT NOT NULL,          -- 保留策略分级；由管理员策略决定，不属人格可改
+  created_at   INTEGER NOT NULL
 );
+CREATE INDEX ix_archive_persona ON archive_records (persona_id, received_at);
+CREATE INDEX ix_archive_retention ON archive_records (retention_class, created_at);
 ```
+
+**Archive 表的约束**
+
+1. `event_id` 为主键，**天然幂等**：重复归档请求 `INSERT OR IGNORE` / 唯一冲突视为已存在。
+2. `content_enc` **必须**是密文；`key_id` 属 Archive 密钥域，**不得**与 `memory_nodes.key_id` 混用或互相派生。
+3. 本表**不得**被 Brain 侧连接。P1 阶段本表**不创建**（无 Archive Writer）。
+4. 保留策略由 `retention_class` 表达，与主观记忆的 `lifecycle` / `epoch` / 墓碑**完全独立**：
+   遗忘主观记忆**不会**删除 Archive；清理 Archive **不会**改写主观叙述。
 
 ## 6. 版本与纪元
 
