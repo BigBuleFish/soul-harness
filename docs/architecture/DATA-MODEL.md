@@ -99,7 +99,9 @@ CREATE TABLE events (
   archive_disposition TEXT CHECK (archive_disposition IN ('required','excluded')),
   -- 归档状态：与 archive_ref 分离，支持"已归档但引用未提交"的崩溃恢复
   archive_state  TEXT NOT NULL DEFAULT 'none'
-                 CHECK (archive_state IN ('none','pending','archived','failed','excluded'))
+                 CHECK (archive_state IN ('none','pending','archived','failed','excluded')),
+  -- 终态原因码（进入 expired/rejected 时必填，见 RUNTIME-LIFECYCLE §7.6）
+  status_reason  TEXT
 );
 CREATE INDEX ix_events_persona_status ON events (persona_id, status, received_at);
 CREATE INDEX ix_events_session ON events (session_id, received_at);
@@ -154,6 +156,7 @@ CREATE TABLE schema_migrations (
 | `events.archive_ref` | 不透明引用（ID 或哈希），**不是路径**；**P1 允许 NULL** | 文件路径、可直接读取的 URI、SQL 片段、密钥材料 |
 | `events.archive_state` | 枚举 `none/pending/archived/failed/excluded` | 任何原文或可推断原文的附加信息 |
 | `events.archive_disposition` | 枚举 `required/excluded`（P1 为 NULL） | 模型产出的判定、自由文本理由 |
+| `events.status_reason` | 枚举原因码（`buffer_lost` / `queue_overflow` / `archive_unavailable` / `auth_failed` …） | 自由文本、错误消息原文、异常堆栈中含内容的片段 |
 | `tasks.payload_json` | **只放引用**：`eventId` / `nodeId` / `threadId` / 参数枚举 | 任何原文、上下文正文、模型输入原文 |
 | `runtime_state.checkpoint_json` | 游标、队列位置、版本号、活跃 ID 列表 | 任何正文、对话片段、思维内容 |
 | 日志 / 遥测 | 计数、耗时、错误码、ID | 默认不记录原文；确需时须脱敏并显式开关 |
@@ -194,6 +197,31 @@ CREATE TABLE schema_migrations (
    `attention_outcome` 记录**最近一次**判定；完整历史写入审计流，不进主观回忆。
 4. 事件进入模型解释的前提是 `attentionOutcome ∈ {partially_aware, fully_aware, forced_control}`。
    **不得**让模型先读全文再表演"没注意到"。
+
+### 3.3 pending 事件行（归档前置记录）
+
+`required` 事件在调用 Archive Writer 之前，必须先落一条 **metadata-only** 的 pending 行：
+
+| 列 | pending 时的值 | 约束 |
+|---|---|---|
+| `id` | `eventId` | 已分配，不得因重试更换 |
+| `status` | `received` | 尚未 ACK |
+| `archive_state` | `pending` | **崩溃恢复的扫描判据** |
+| `archive_ref` | `NULL` | 归档成功后与另两个字段**同一事务**提交 |
+| `archive_disposition` | `required` | 判定结果已固化 |
+| `summary` / 正文类字段 | `NULL` | **pending 行不得含正文、摘要、原文哈希** |
+
+**为什么必须先落 pending**：归档是跨进程动作，若只在内存里挂一个"待归档"任务，
+崩溃后这条任务就消失了，适配器却已经收到（或永远收不到）ACK —— 系统会出现"看不见的中间态"。
+落 pending 让每一条欠账都可被扫描、可被对账。
+
+**完成事务**：`archive_ref` + `archive_state='archived'` + `status='accepted'` 三条在**同一短事务**提交。
+不允许多次写入，也不允许"先改状态后补引用"。
+
+**不创建 pending 的情形**
+
+- `excluded` 事件：直接以 `archive_state='excluded'`、`status='accepted'` 入库，一步完成。
+- P1：直接以 `archive_state='none'`、`archive_disposition=NULL`、`status='accepted'` 入库。
 
 ## 4. 二期表（P3–P5：记忆网络与思维）
 
@@ -370,39 +398,85 @@ CREATE TABLE archive_records (
   source       TEXT NOT NULL,
   received_at  INTEGER NOT NULL,
   occurred_at  INTEGER,
-  content_enc  BLOB NOT NULL,             -- 加密后的原始记录（不得明文）
-  key_id       TEXT NOT NULL,             -- Archive 专属密钥标识（与主观记忆密钥不同域）
+  content_enc  BLOB NOT NULL,             -- 加密后的原始记录（AEAD 密文，不得明文）
+  enc_key_id   TEXT NOT NULL,             -- AEAD 加密密钥标识（Archive 域，与主观记忆不同）
+  mac_key_id   TEXT NOT NULL,             -- HMAC 指纹密钥标识（**与 enc_key_id 不同密钥**）
   ciphertext_sha256 TEXT NOT NULL,        -- **密文**完整性校验；禁止用原文普通 SHA-256
-  content_fingerprint TEXT NOT NULL,      -- 键控指纹 HMAC(archiveKey, 明文)，仅用于同 eventId 冲突检测
+  content_fingerprint TEXT NOT NULL,      -- 键控指纹 HMAC(mac_key, 明文)，仅用于同 eventId 冲突检测
   byte_len     INTEGER NOT NULL,          -- 密文字节长度（非原文长度）
   retention_class TEXT NOT NULL
                  CHECK (retention_class IN ('standard','restricted','short_lived')),
-  created_at   INTEGER NOT NULL
+  created_at   INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL           -- **保留期限固化**：到期即删，不得为 NULL
 );
 CREATE INDEX ix_archive_persona ON archive_records (persona_id, received_at);
-CREATE INDEX ix_archive_retention ON archive_records (retention_class, created_at);
+CREATE INDEX ix_archive_expiry ON archive_records (expires_at);
+
+-- Archive 决策审计：只有"谁按哪条规则判了什么"，不含任何内容。
+-- 归属：Reliable World / 审计侧；由 Ingress 决策路径写入，不属 Archive 域。
+CREATE TABLE archive_decisions (
+  event_id       TEXT PRIMARY KEY,        -- 一条事件一条决策记录
+  disposition    TEXT NOT NULL CHECK (disposition IN ('required','excluded')),
+  policy_id      TEXT NOT NULL,           -- 策略标识
+  rule_id        TEXT NOT NULL,           -- 命中规则标识
+  policy_version TEXT NOT NULL,           -- 策略版本（可追溯当时规则）
+  decided_at     INTEGER NOT NULL,
+  expires_at     INTEGER NOT NULL         -- 决策记录自身保留期限
+);
+CREATE INDEX ix_decisions_policy ON archive_decisions (policy_id, policy_version, decided_at);
 ```
 
 ### 5.1 Archive 表字段约束（完整性、指纹、保留）
 
 1. `event_id` 为主键，**天然幂等**：重复归档请求视为已存在，不产生第二条记录。
-2. `content_enc` **必须**是密文。`key_id` 属 Archive 密钥域，**不得**与 `memory_nodes.key_id`
-   混用或互相派生（两套密钥体系独立）。
-3. **完整性校验用密文哈希**：`ciphertext_sha256` 校验"存储未损坏"。
+2. `content_enc` **必须**是 AEAD 密文。`enc_key_id` 属 Archive 密钥域，**不得**与
+   `memory_nodes.key_id` 混用或互相派生（两套密钥体系独立）。
+3. **加密密钥与指纹密钥必须分离**：
+   - `enc_key_id` → AEAD 加密/解密用；
+   - `mac_key_id` → 仅用于 `content_fingerprint` 的 HMAC。
+   - 二者**不得**是同一密钥，也不得由同一密钥直接派生而无法独立轮换。
+   - 理由：指纹会参与冲突判定（读取路径），加密密钥只用于解密（严格路径）。
+     合一会把"能比对"升级成"能解密"。
+4. **完整性校验用密文哈希**：`ciphertext_sha256` 校验"存储未损坏"。
    **禁止**把原文的普通 SHA-256 作为长期审计元数据保存 —— 短文本的普通哈希
    可被字典/穷举反推，等于变相留存原文。
-4. **冲突检测用键控指纹**：`content_fingerprint = HMAC(archiveKey, 原文)`。
-   - 同一 `eventId` 再次归档时，比较指纹：相同 → 幂等命中；**不同 → 拒绝覆盖并报告冲突**。
+5. **冲突检测用键控指纹**：`content_fingerprint = HMAC(mac_key, 原文)`。
+   - 同一 `eventId` 再次归档时比较指纹：相同 → 幂等命中；**不同 → 拒绝覆盖并报告冲突**。
    - 该指纹**不得**外发给 Brain（IPC 只回 `eventId` / `archiveState` / `archiveRef`），
      也不得用于跨事件的内容比对。
    - 指纹随记录与密钥一起销毁，不做长期保留。
-5. `byte_len` 记录**密文**长度，不泄露原文长度（必要时填充到固定分组）。
-6. `retention_class` 只能取 `standard` / `restricted` / `short_lived`。
-   **每条记录必须归属有限期分类**；策略未配置有限保留期时**拒绝归档**，不得默认永久。
-7. 本表**不得**被 Brain 侧连接。P1 阶段本表**不创建**（无 Archive Writer）；
+6. `byte_len` 记录**密文**长度，不泄露原文长度（必要时填充到固定分组）。
+7. **保留期限以 `expires_at` 固化**：写入时即算出绝对到期时间，不依赖"运行时再解释策略"。
+   - `expires_at` **不允许为 NULL、不允许 0、不允许表示"永久"**。
+   - 策略未配置有限保留期 → **拒绝归档**（配置错误），不得回退为永久。
+   - `retention_class` 只决定"用哪档算出 `expires_at`"，删除以 `expires_at` 为准。
+8. 本表**不得**被 Brain 侧连接。P1 阶段本表**不创建**（无 Archive Writer）；
    `excluded` 事件**不创建**本表记录。
-8. 保留策略与主观记忆的 `lifecycle` / `epoch` / 墓碑**完全独立**：
+9. 保留策略与主观记忆的 `lifecycle` / `epoch` / 墓碑**完全独立**：
    遗忘主观记忆**不会**删除 Archive；清理 Archive **不会**改写主观叙述。
+
+### 5.2 Archive 决策记录（archive_decisions）
+
+| 字段 | 含义 | 约束 |
+|---|---|---|
+| `event_id` | 对应事件 | 主键，一条事件一条 |
+| `disposition` | `required` / `excluded` | 枚举，不得自由文本 |
+| `policy_id` | 命中策略 | 配置标识 |
+| `rule_id` | 命中规则 | 配置标识 |
+| `policy_version` | 策略版本 | 保证历史判定可追溯 |
+| `decided_at` | 判定时间 | Unix ms |
+| `expires_at` | 决策记录保留期限 | 有限期，不得永久 |
+
+**禁止字段**：正文、摘要、关键词、情感标签、原文哈希、原文长度、可反推内容的任何派生值。
+决策记录只回答"谁按哪条规则判了什么"，**不回答"内容是什么"**。
+
+**归属与权限**
+
+- **归属**：Reliable World / 审计侧（不是 Archive 域，也不是主观记忆域）。
+- **写入**：仅 Ingress 决策路径写，一条事件一条，不更新（`INSERT OR IGNORE` 保持幂等）。
+- **读取**：管理员审计与 Studio 的审计视图；**Brain 运行时上下文不得读取**
+  （它会让模型"知道自己被审计"从而改变行为，且本身就是审计信息泄露）。
+- **保留**：`expires_at` 到期删除；与事件记录、Archive 记录**各自独立**，不随其删除而删除。
 
 ## 6. 版本与纪元
 

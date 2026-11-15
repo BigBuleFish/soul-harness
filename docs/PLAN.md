@@ -203,7 +203,44 @@ Soul Harness 是一个**独立运行的认知运行时**，不依赖 DSH、Minec
 - 具体保留天数**暂不决定（OPEN）**，但所有实际记录必须归属**有限期**分类，
   **不允许默认永久保存**；策略未配置有限期时**拒绝归档**。
 
-> 详细流转见 `RUNTIME-LIFECYCLE.md` §7.1–§7.5；字段级约束见 `DATA-MODEL.md` §3.1 / §5.1。
+**决议七：pending 持久化与原子提交（SH-002.3 新增）。**
+
+- Archive Writer 执行**之前**，先以短事务写入 **metadata-only pending 事件行**
+  （`status='received'`、`archive_state='pending'`、`archive_ref=NULL`）。
+- pending 行**不含正文、摘要、原文哈希**，它只是"欠一条归档"的账。
+- 归档成功后，用**一个短事务同时提交** `archive_ref` + `archive_state='archived'` + `status='accepted'`，
+  不允许分两次写。
+- **ACK 在事务提交之后返回**；提交前 ACK 视为缺陷。
+- 崩溃后**所有**未完成 pending 记录必须可被扫描（判据 `archive_state='pending'`），
+  不允许存在"看不见的中间态"。
+
+**决议八：P1 / P8 处理保证（SH-002.3 新增）。**
+
+| 维度 | P1 | P8 |
+|---|---|---|
+| Archive | 无，不写 pending | 加密原始记录 |
+| 原文 | 只在 TTL 缓冲 | 缓冲 + Archive 密文（独立） |
+| `accepted` 保证 | 仅"通过鉴权并落信封" | `required`：仅"已归档并落信封" |
+| 崩溃丢缓冲 | 标 `expired`（`buffer_lost`） | `required`：pending 按 IPC 补标记或标 `failed`；**禁止从 Archive 反读正文** |
+| 未完成认知处理终态 | `expired` / `rejected`，原因码必填 | 同左；**不得推断或补写 `understood`** |
+
+`accepted` 在两种形态下都**不保证认知处理完成**。**不允许伪装成已理解。**
+
+**决议九：归档决策审计（SH-002.3 新增）。**
+
+- 每条事件保留一条决策记录：`eventId` / `disposition` / `policyId` / `ruleId` / `policyVersion` / `decidedAt`。
+- **不含**正文、摘要、关键词、原文哈希或可反推字段。
+- 归属 **Reliable World / 审计侧**；**Brain 运行时上下文不得读取**。
+- 有独立保留期限（`expiresAt`），与事件记录、Archive 记录各自独立。
+
+**决议十：加密与接口细化（SH-002.3 新增）。**
+
+- **AEAD 加密密钥与 HMAC 指纹密钥分离**，可独立轮换，不得由同一密钥派生而无法分开轮换。
+- 保留期限写入时**固化为 `expiresAt`**（绝对时间），删除以其为准；不允许 NULL / 0 / 永久。
+- Archive Writer 对外只有两个接口：**`append`（写）** 与 **`status`（只回 `eventId`/`archiveState`/`archiveRef`）**；
+  状态查询**不返回任何内容**，二者不得合并。
+
+> 详细流转见 `RUNTIME-LIFECYCLE.md` §7.1–§7.6；字段级约束见 `DATA-MODEL.md` §3.1 / §3.3 / §5.1 / §5.2。
 
 ## 7. 开发阶段 P0–P9 与各阶段验收
 

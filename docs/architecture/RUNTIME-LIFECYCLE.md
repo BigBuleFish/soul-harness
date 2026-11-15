@@ -159,26 +159,32 @@ Adapter 提交（信封 + 正文）
 [2] 写入短暂感知缓冲（TTL，默认 60s，可配）
    │     └── 正文此刻**只存在于**该缓冲
    ▼
-[3] 确定性策略判定 archive_disposition（**不经过模型**，见 §7.2）
+[3] 确定性策略判定 archive_disposition（**不经过模型**，见 §7.2.1）
    │
-   ├── required 且 Archive 能力已启用 ─────────────────────────┐
-   │                                                          │
-   │   [3R] Archive Writer 加密写入（按 eventId 幂等）          │
-   │      │  ✗ 失败 → 有界重试 → 耗尽则对适配器 503            │
-   │      │           **不得 ACK accepted**，不得降级 excluded  │
-   │      ▼                                                   │
-   │   [3S] 提交 events.archive_ref + archive_state='archived'  │
-   │      │  ✗ 崩溃窗口 → 按 §7.4 恢复（IPC 只查状态）           │
-   │      ▼                                                   │
-   │   [3A] ACK accepted  ← required 事件只在这里 ACK           │
-   │                                                          │
-   ├── excluded ─────────────────────────────────────────────┘
-   │      → archive_state='excluded'，**不创建 Archive Record**
-   │      → [3A] ACK accepted（无审计承诺）
+   ├── required 且 Archive 能力已启用 ─────────────────────────────────┐
+   │                                                                  │
+   │   [3P] **短事务**：写入 metadata-only pending 事件行                 │
+   │         `status='received'`、`archive_state='pending'`、            │
+   │         `archive_ref=NULL`、**无正文**                              │
+   │         ✗ 失败 → 503，**不 ACK**（适配器可同 eventId 重投）           │
+   │                                                                  │
+   │   [3R] Archive Writer `append`（加密，按 eventId 幂等）              │
+   │         ✗ 失败 → 有界重试 → 耗尽则 503                              │
+   │         **不得 ACK，不得降级 excluded，不得落 events 正文**           │
+   │                                                                  │
+   │   [3S] **短事务（单次提交三个字段）**：                              │
+   │         `archive_ref` + `archive_state='archived'` + `status='accepted'` │
+   │         ✗ 失败 → 留在 pending，交由 §7.3 恢复                        │
+   │                                                                  │
+   │   [3A] ACK `accepted`  ← **必须在 [3S] 事务提交之后**               │
+   │                                                                  │
+   ├── excluded ─────────────────────────────────────────────────────┘
+   │      [3E] 短事务：`archive_state='excluded'`、`status='accepted'`（**不建 Archive Record**）
+   │      [3A] ACK `accepted`（无审计承诺）
    │
    └── Archive 能力关闭（P1）
-          → archive_state='none'，不判定 disposition
-          → [3A] ACK accepted（**不承诺原始事件审计**）
+          [3N] 短事务：`archive_state='none'`、`archive_disposition=NULL`、`status='accepted'`
+          [3A] ACK `accepted`（**不承诺原始事件审计**）
    ▼
 [4] Pre-attention 判定 → attentionOutcome
    │   ├── ignored        → status 保持 accepted，TTL 到期 → expired
@@ -199,13 +205,15 @@ Adapter 提交（信封 + 正文）
 |---|---|
 | 1 | 正文**只能**存在于 [2] 的 TTL 缓冲、`required` 事件的**加密归档记录**、以及 [6] 之后的**密文片段** |
 | 2 | `events`、`tasks.payload_json`、`runtime_state.checkpoint_json`、日志**一律不得**成为原文旁路 |
-| 3 | `required` 事件：**Archive 持久化 + `archive_ref` 提交完成之前，不得返回 `accepted`** |
-| 4 | `required` 事件：Archive 失败**不得**自动降级为 `excluded`，**不得**进入正式 `understood` / `response_committed` 流程 |
-| 5 | `excluded` 事件：不创建 Archive Record，不提供审计能力，原文仍只能在感知缓冲中存在 |
-| 6 | 归档判定（disposition）**不得**经过模型：模型无权决定某条输入是否需要审计 |
-| 7 | 归档写入**不得**因 [4] 的 `ignored` 而跳过；`required` 事件的归档先于注意判定 |
-| 8 | 归档失败时**不得**把正文降级写入 `events` 或任何其他长期表 |
-| 9 | P1（Archive 关闭）：`archive_state='none'`，正文随 TTL 删除，**不承诺任何原始事件审计能力** |
+| 3 | **pending 事件行只存元数据**：`eventId`、信封、`disposition`、`archive_state`；**不含正文、摘要、原文哈希** |
+| 4 | `required` 事件：`archive_ref` / `archive_state` / `status` **在同一个短事务里一起提交**，不允许分两次写 |
+| 5 | **ACK 必须在数据库事务提交之后返回**；未提交即 ACK 视为缺陷 |
+| 6 | `required` 事件：Archive 失败**不得**自动降级为 `excluded`，**不得**进入 `understood` / `response_committed` |
+| 7 | `excluded` 事件：不创建 Archive Record，不提供审计能力，原文仍只能在感知缓冲中存在 |
+| 8 | 归档判定（disposition）**不得**经过模型：模型无权决定某条输入是否需要审计 |
+| 9 | 归档**不得**因 [4] 的 `ignored` 而跳过；`required` 事件的归档先于注意判定 |
+| 10 | 崩溃后可扫描到**所有**未完成的 pending 记录（`archive_state='pending'`），不得有"看不见的中间态" |
+| 11 | P1（Archive 关闭）：`archive_state='none'`，正文随 TTL 删除，**不承诺任何原始事件审计能力** |
 
 ### 7.2 Archive 存储语义与 P1 决议
 
@@ -263,43 +271,81 @@ Adapter 提交（信封 + 正文）
 3. 若某策略未配置有限保留期 → **拒绝归档该记录**（返回配置错误），不得回退为永久。
 4. 保留期到期由 Archive Writer 按分类执行删除，**独立于**主观记忆的遗忘流程。
 
-### 7.3 写入失败、幂等与恢复
+### 7.3 pending 持久化、写入失败与恢复
+
+**pending 机制（本轮冻结）**
+
+1. `required` 事件在调用 Archive Writer **之前**，先以**短事务**写入一条 **metadata-only** 的 pending 事件行：
+   - `status = 'received'`
+   - `archive_state = 'pending'`
+   - `archive_ref = NULL`
+2. pending 行**只存元数据**：`eventId`、信封、`personaId`、`disposition`、时间戳。
+   **不存正文、不存摘要、不存原文哈希**（判据见 `DATA-MODEL.md` §3.1）。
+3. Archive Writer 归档成功（Archive 侧事务已提交）后，用**一个短事务同时提交三个字段**：
+   `archive_ref` + `archive_state='archived'` + `status='accepted'`。
+   **不允许分两次写** —— 否则会出现"归档了但没记上"或"记上了但没归档"。
+4. **ACK 在该短事务提交之后返回。** 提交前 ACK 视为缺陷（§7.4）。
+5. 崩溃后**所有**未完成的 pending 记录都必须可被扫描到，判据是 `archive_state='pending'`。
+   不允许存在"看不见的中间态"（例如只存在于内存队列里的归档任务）。
+
+**失败与降级**
 
 | 情形 | 处理 |
 |---|---|
-| P1（Archive 关闭） | 不派发归档；正文随 TTL 删除；`archive_state='none'`、`archive_ref` 为 NULL |
-| `required` 瞬时失败 | 有界重试（默认 3 次，指数退避）。重试期间正文留在缓冲内，**不复制到 `events`**；**期间不 ACK `accepted`** |
-| `required` 重试耗尽 | 对适配器返回 **503**；事件**不得**进入 `understood` / `response_committed`；**不得**降级为 `excluded`，**不得**落 `events` |
+| P1（Archive 关闭） | 不写 pending；`archive_state='none'`、`disposition=NULL`；正文随 TTL 删除 |
+| pending 写入失败 | 返回 **503**，不 ACK；不派发 Archive Writer |
+| Archive append 瞬时失败 | 有界重试（默认 3 次，指数退避）。重试期间正文留在缓冲内，**不复制到 `events`**；**仍不 ACK** |
+| append 重试耗尽 | 返回 **503**；pending 行标 `archive_state='failed'`；`status` 不进入 `understood` / `response_committed`；**不得**降级为 `excluded` |
+| 3S 提交失败 | pending 保留，交由恢复流程处理；**不重试 Archive append**（可能已写入） |
 | Archive 长时间不可用 | 对 `required` 源停止受理（503），而不是收下却记不住 |
 | `excluded` 事件 | 与 Archive 无关，照常处理；无审计 |
-| 恢复后 | **不追补、不重放**历史正文；新刺激按新规则处理 |
 
 **幂等（硬要求）**
 
-1. **Archive Writer 自己负责 `eventId` 幂等**：同一 `eventId` 重复写入不得产生第二条记录。
-2. **同一 `eventId` 对应不同内容 → 拒绝覆盖并报告冲突**（错误码 `archive_conflict`）：
-   保留原始记录不变，冲突事件写入审计（**不含内容**），并把该 `eventId` 标记为冲突待人工处理。
-   - "不同内容"的判定在 Archive Writer 内部完成（见 `DATA-MODEL.md` §5.1 的指纹字段）。
-   - Brain 侧**看不到**判定依据，只收到冲突错误码。
+1. **Archive Writer 自己负责 `eventId` 幂等**：同一 `eventId` 重复 append 不得产生第二条记录。
+2. **同一 `eventId` 对应不同内容 → 拒绝覆盖并报告冲突**（`archive_conflict`）：
+   保留原始记录不变，冲突写入审计（**不含内容**），该 `eventId` 标记为冲突待人工处理。
+   判定在 Archive Writer 内部完成（键控指纹，见 `DATA-MODEL.md` §5.1）；Brain 只见错误码。
+3. 恢复流程**不得**改变 `eventId`、不得为同一条刺激生成新的 `eventId`。
 
 **恢复流程（Brain 不直连 Archive）**
 
-1. **Brain 不允许直接连接 Archive 数据库**。它没有连接串、没有句柄、没有密钥。
-2. 恢复只能通过**受限 IPC** 获取以下三项，**且只此三项**：
-   - `eventId`
-   - `archiveState`
-   - `archiveRef`
-3. **不得**通过该 IPC 返回：原文、密文、解密内容、内容指纹、字节长度、密钥信息、任何可推断内容的字段。
-4. 流程：扫描 `archive_state='pending'` 的事件 → 逐个 IPC 查询：
-   - `archived` → 只补 `archive_ref`，**不重写原文**；
-   - `not_found` → 重新派发归档（若缓冲已过期则标记 `failed` 并丢弃，**不伪造记录**）；
-   - `failed` / 冲突 → 记录并上报，不自动"修复"。
-5. 归档写入成功与 `archive_ref` 提交**不要求同一事务**（跨进程），但必须保证
-   "**至多一次归档、至少一次标记尝试**"。
-6. 恢复扫描必须有界（批量 + 限速），不得在启动时全表扫描。
+1. **Brain 不允许直接连接 Archive 数据库**：无连接串、无句柄、无密钥。
+2. 恢复只能通过 **Archive Writer 的受限状态查询 IPC**，取得三项**且只此三项**：
+   `eventId`、`archiveState`、`archiveRef`。
+3. **不得**返回：原文、密文、解密内容、内容指纹、字节长度、密钥信息、任何可推断内容的字段。
+4. 恢复扫描必须有界（批量 + 限速），不得在启动时全表扫描。
+
+**恢复时序（崩溃发生在 pending 之后）**
+
+```
+t0  短事务：写入 pending 事件行（已提交）        events: pending / status=received
+t1  Archive Writer append 成功                  Archive: 记录已提交
+t2  崩溃                                        events 仍是 pending，无 archive_ref，**未 ACK**
+
+恢复
+ R1  启动：有界扫描 archive_state='pending'
+ R2  IPC archive.status(eventId)  →  archived
+ R3  短事务：写 archive_ref + archive_state='archived' + status='accepted'
+ R4  完成。适配器若重投同一 eventId → 幂等返回已接受
+```
+
+```
+t0  短事务：写入 pending 事件行（已提交）
+t1' 崩溃（**Archive 尚未写入**）
+ R1  启动扫描 → 找到 pending
+ R2  IPC → not_found
+ R3  进程已重启，**感知缓冲已随内存消失，正文无法重放**
+     → 标记 archive_state='failed'、status='expired'（原因码 buffer_lost）
+     → **不重建、不推测、不伪造归档记录**
+ R4  适配器重投同一 eventId → 进入正常流程（重新写 pending、重新归档）
+```
+
+**关键取舍**：崩溃后**不允许**为了"补齐"而从 Archive 反向读取正文（那会让 Archive 变成主观记忆的输入源）。
+恢复只做两件事：补标记，或如实标记失败。
 
 **不允许的"聪明做法"**：把正文暂存到 `tasks.payload_json` 等它恢复；写临时文件；压进日志；
-在重试时改变 `eventId` 以"绕过冲突"；让 Brain 直连 Archive 只读"确认一下"。
+重试时换 `eventId` 绕过冲突；让 Brain 直连 Archive"只读确认一下"；崩溃后用 Archive 正文重建缓冲。
 
 ### 7.4 ACK 语义（按 disposition 区分）
 
@@ -307,18 +353,19 @@ Adapter 提交（信封 + 正文）
 
 | 事件类别 | `accepted` 的含义 | **不代表** |
 |---|---|---|
-| `required`（Archive 已启用） | Archive **已加密持久化**，**且** `events.archive_ref` 已提交 | 不代表已注意、已理解、已形成记忆 |
+| `required`（Archive 已启用） | Archive **已加密持久化**，且 `archive_ref` / `archive_state` / `status` **已在同一事务提交** | 不代表已注意、已理解、已形成记忆 |
 | `excluded` | 已通过鉴权并持久化信封（`archive_state='excluded'`） | 不代表已归档（本就不归档）、不代表具备审计 |
 | P1（`archive_state='none'`） | 已通过鉴权并持久化信封 | **不代表已归档**；系统此时无审计能力 |
 
 **规则**
 
-1. `required` 事件在归档完成前**不得**返回 `accepted`；失败重试耗尽则返回 **503**。
-2. `accepted` **不保证内容被长期保留**：TTL 到期、队列溢出、注意力忽略都可能导致
-   该事件不形成任何主观记忆。**审计与记忆是两件事** —— `required` 事件即使没被记住，原文仍在 Archive。
-3. `excluded` 与 P1 事件：`accepted` 之后系统仍可能不保留任何内容，且**永远无法补查**。
-4. Adapter SDK 必须逐条写明上表，禁止适配器把 `accepted` 解释为"已存档"或"已记住"。
-5. 对 `required` 源，Adapter 必须处理 503：退避重试、同一 `eventId` 重投，**不得**换新 ID。
+1. **ACK 一律在数据库事务提交之后返回**，且不得早于该事务。
+2. `required` 事件在归档完成前**不得**返回 `accepted`；失败重试耗尽返回 **503**。
+3. `accepted` **不保证认知处理完成**：TTL 到期、队列溢出、注意力忽略都可能导致不形成任何主观记忆。
+   **审计与记忆是两件事** —— `required` 事件即使没被记住，原文仍在 Archive。
+4. `excluded` 与 P1 事件：`accepted` 之后系统仍可能不保留任何内容，且**永远无法补查**。
+5. Adapter SDK 必须逐条写明上表，禁止把 `accepted` 解释为"已存档"或"已记住"或"已处理完"。
+6. 对 `required` 源，Adapter 必须处理 503：退避重试、同一 `eventId` 重投，**不得**换新 ID。
 
 ### 7.5 队列溢出与事件重试
 
@@ -331,6 +378,30 @@ Adapter 提交（信封 + 正文）
 | 迟到事件（`occurred_at` 远早于 `received_at`） | 允许处理，但 `subjective_time` 必须用 `occurred_at` 与接收时间共同表达，不得伪装成"刚刚发生" |
 
 所有队列必须**有限、可过期、带反刷屏限流**。
+
+### 7.6 P1 与 P8 的处理保证对照
+
+| 维度 | **P1（Archive 关闭）** | **P8（Archive 启用）** |
+|---|---|---|
+| Archive | 不存在，不写 pending | 加密原始记录，独立密钥域 |
+| 原文位置 | 只在短暂感知缓冲；TTL 到期删除 | 缓冲 + Archive 密文（两者独立） |
+| `archive_disposition` | NULL | 确定性策略判定 `required` / `excluded` |
+| `archive_state` | `none` | `pending` → `archived` / `failed`；排除者 `excluded` |
+| ACK 时机 | 信封持久化后 | `required`：三字段同一事务提交后；`excluded`：信封持久化后 |
+| `accepted` 保证 | 仅"已通过鉴权并落信封" | 仅"已归档并落信封"，**都不保证认知处理完成** |
+| 崩溃丢缓冲 | 事件标 `expired`（`buffer_lost`）或视为处理丢失 | `required`：pending 保留，恢复时按 IPC 结果补标记或标 `failed` |
+| 崩溃后能否补正文 | **不能** | **不能**（禁止从 Archive 反读），只能重投 |
+| 未完成认知处理的终态 | `expired`，原因码必填 | 同左；**不得**标记 `understood` |
+| 审计能力 | **无**；文档/API/UI 不得暗示 | 仅覆盖 `required` 范围 |
+| 能否伪装成已理解 | **绝对不允许** | **绝对不允许** |
+
+**终态定义（两者一致）**
+
+未完成认知处理的事件，恢复后只能落在以下终态之一，且必须带原因码：
+
+- `expired`：TTL 到期、队列溢出、缓冲随崩溃丢失（`buffer_lost`）；
+- `rejected`：鉴权失败、注入嫌疑、Archive 不可用（`archive_unavailable`）；
+- `understood` **只有在模型确实完成解释后**才允许出现。**崩溃恢复不得推断、不得补写 `understood`。**
 
 ## 8. 睡眠与唤醒
 
