@@ -147,49 +147,63 @@ Soul Harness 是一个**独立运行的认知运行时**，不依赖 DSH、Minec
 
 | 能力 | 启用前必须满足 |
 |---|---|
-| **Sealed Archive** | 独立数据库文件 + 独立进程 + 独立文件权限（Brain 账号无读权）+ 无查询 SDK 编译进 Brain + **加密存储 + 独立密钥层级** + 按 `eventId` 幂等 + 句柄审计通过。**未满足前不创建该表，原始正文不落盘**（见 §6.3 与 `RUNTIME-LIFECYCLE.md` §7.2） |
+| **Sealed Archive** | 独立数据库文件 + 独立进程 + 独立文件权限（Brain 账号无读权）+ 无查询 SDK 编译进 Brain + **加密存储 + 独立密钥体系** + 按 `eventId` 幂等 + **仅暴露受限状态 IPC** + **有限期保留分类** + 句柄审计通过。**未满足前不创建该表，原始正文不落盘**（见 §6.3 与 `RUNTIME-LIFECYCLE.md` §7.2） |
 | **Action Gateway** | 独立进程 + 独立能力令牌 + 幂等键持久化 + 回执校验 + "重复执行次数 = 0"测试通过 |
 | **Dream Sandbox** | **独立进程**（非仅 Worker Thread）+ 无网络 + 无文件写 + 无真实工具令牌 + 逃逸测试通过。**Worker Thread 不构成安全边界**（同进程共享内存与权限），只可用于非安全目的的数值计算 |
 
 > 这条是对 SH-001 审查发现的修正：此前文档一边说"首期单库"，一边在 `TRUST-BOUNDARIES` 里宣称
 > "进程分离 + 文件权限"。两者不能同时为真。现统一为：**P1 承认没有物理隔离，也不启用需要物理隔离的能力。**
 
-### 6.3 P1 事件接入与 Archive 语义（SH-002.1 正式决议）
+### 6.3 P1 事件接入与 Archive 语义（SH-002.1 决议 + SH-002.2 修订）
 
 **决议一：P1 允许在没有 Archive Writer 的情况下接收外部事件。**
 
 | 允许 | 限制 |
 |---|---|
-| 接收并验证 Stimulus；创建 `eventId`；持久保存信封与非内容元数据 | `events.archive_ref` **允许为 NULL**，`archive_state = 'none'` |
+| 接收并验证 Stimulus；创建 `eventId`；持久保存信封与非内容元数据 | `archive_disposition` 为 NULL、`archive_state='none'`、`archive_ref` 为 NULL |
 | 原始正文仅存在于有 TTL 的短暂感知缓冲 | TTL 到期**必须删除**；不得用索引、日志、检查点变相保留 |
 | — | **不承诺提供原始事件审计能力**；文档、API、UI 均不得暗示具备 |
 | — | 不得把原始正文或自然语言摘要保存到 `events`、`tasks`、`checkpoint`、日志 |
 
 **决议二：Archive 保存加密的原始记录，与主观记忆完全分离。**
 
-- Archive 原始数据**必须加密存储**，使用**独立于主观记忆的密钥层级**，**禁止混用或互相派生**。
+- Archive 原始数据**必须加密存储**，使用**独立于主观记忆的密钥体系**，**禁止混用或互相派生**。
 - Brain **永远没有** Archive 的密钥与读取权限。
 - **Archive Writer 是唯一原始记录写入者**，按 `eventId` 幂等。
-- Archive 拥有**独立的保留与删除策略**，不被主观记忆的 epoch / 墓碑影响，也不影响它们。
+- 完整性校验使用**密文哈希**（`ciphertext_sha256`）；**禁止**保存原文的普通 SHA-256。
 - **不得**把 Archive 内容导入主观记忆作为隐藏正确答案；只能作为新观察从 Ingress 重新进入。
 
-**决议三：归档与注意解耦（完整归档模式）。**
+**决议三：完整归档的范围由确定性策略限定（SH-002.2 修订）。**
 
-归档对象 = 通过 Ingress 鉴权与校验的**全部**刺激，与 `attentionOutcome`、与是否编码**无关**。
-因此系统**可以**宣称对已认证输入具备完整审计。
-**若将来改为选择性归档**，必须同时写明选择规则、取消"完整审计"表述、并下调验收承诺。
+- 归档对象 = 通过 Ingress 鉴权与校验、**且被确定性策略判定为 `required`** 的事件。
+- **完整审计承诺只覆盖 `required` 范围**；`excluded` 事件明确不在承诺内。
+- `excluded` 必须有明确策略依据（可审计的策略 ID + 命中规则）；**模型不得参与判定**。
+- 判定与注意、与编码**无关**；判定不依赖人格意愿。
+- 若策略扩大 `excluded` 范围，必须同步下调文档、API、UI 中的审计表述。
 
-**决议四：崩溃窗口的幂等恢复。**
+**决议四：崩溃窗口的幂等恢复，且 Brain 不直连 Archive（SH-002.2 修订）。**
 
-Archive 已写入但 `events.archive_ref` 未提交时，重启后按 `eventId` 查询 Archive：
-已存在则**只补标记**，不存在则重新派发（缓冲已过期则丢弃并标记）。**不得产生重复归档记录。**
+- **Brain 不允许直接连接 Archive 数据库。**
+- 恢复只能通过**受限 IPC** 取得三项，且只此三项：`eventId`、`archiveState`、`archiveRef`。
+  **不得**返回原文、密文、解密内容、指纹或长度。
+- Archive Writer 自己负责 `eventId` 幂等；同一 `eventId` 对应**不同内容**必须**拒绝覆盖并报告冲突**。
+- 崩溃窗口（Archive 已写、`archive_ref` 未提交）只补标记，不重写原文、不伪造记录、不产生重复归档。
 
-**决议五：`accepted` 不代表已归档。**
+**决议五：`accepted` 的语义按 disposition 区分（SH-002.2 修订）。**
 
-`stimulus.submit` 的 `accepted` ACK 只表示"已通过鉴权并持久化信封"，
-不代表已归档、已注意、已理解或已形成记忆。Adapter SDK 必须明写此条。
+- `required` 事件：**Archive 持久化并提交 `archive_ref` 之前，不允许返回 `accepted`**；
+  Archive 失败**不得**降级为 `excluded`，**不得**进入正式 `understood` / `response_committed`；
+  重试耗尽向适配器返回 **503**，同一 `eventId` 重试必须幂等。
+- `excluded` 与 P1 事件：允许正常 ACK 与认知处理，但**不提供审计能力**，原文仍只在感知缓冲中存在。
 
-> 详细流转见 `RUNTIME-LIFECYCLE.md` §7.1–§7.4；字段级约束见 `DATA-MODEL.md` §3.1。
+**决议六：保留分类（SH-002.2 新增）。**
+
+- `retention_class` 仅取 `standard` / `restricted` / `short_lived`。
+- `excluded` 事件**不创建** Archive Record，不使用 `retention_class`。
+- 具体保留天数**暂不决定（OPEN）**，但所有实际记录必须归属**有限期**分类，
+  **不允许默认永久保存**；策略未配置有限期时**拒绝归档**。
+
+> 详细流转见 `RUNTIME-LIFECYCLE.md` §7.1–§7.5；字段级约束见 `DATA-MODEL.md` §3.1 / §5.1。
 
 ## 7. 开发阶段 P0–P9 与各阶段验收
 
@@ -336,7 +350,7 @@ Studio 最小页面、CLI 健康检查、单实例锁。
 
 ## 11. 风险登记
 
-### 11.1 P0 安全风险（详见 `TRUST-BOUNDARIES.md` §7）
+### 11.1 P0 安全风险（详见 `TRUST-BOUNDARIES.md` §8）
 
 Archive 被读取 · 假遗忘 · 梦境外溢 · 幻觉动作 · 会话串记忆 · 注入攻击 ·
 无限自发循环 · 诱导性虚假记忆影响现实 · 迟到结果覆盖新状态 · 重试导致重复执行。

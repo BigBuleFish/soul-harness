@@ -43,8 +43,8 @@ Markdown 投影（SOUL.md / IDENTITY.md / MEMORY.md …）
 - 逻辑隔离靠两点：**表归属唯一**（每张表只属于一个模块，见 `MODULES.md`）与**接口边界**（跨模块只能走公开接口）。
 - 物理隔离（独立 Archive db 文件、独立权限、独立进程）的启用门槛见 `PLAN.md` §6.2。
   **在门槛达成前，`archive_records` 表不创建**：P1 允许正常接收事件，
-  `events.archive_ref` 恒为 NULL、`archive_state = 'none'`，**系统不承诺原始事件审计能力**
-  （见 §3.1 与 `RUNTIME-LIFECYCLE.md` §7.2）。
+  `archive_disposition` 为 NULL、`archive_state = 'none'`、`archive_ref` 为 NULL，
+  **系统不承诺原始事件审计能力**（见 §3.1 与 `RUNTIME-LIFECYCLE.md` §7.2）。
 
 ## 3. 首期表（P1，只实现这 6 张）
 
@@ -95,9 +95,11 @@ CREATE TABLE events (
   received_at    INTEGER NOT NULL,
   occurred_at    INTEGER,
   updated_at     INTEGER NOT NULL,
+  -- 归档判定：确定性策略产物，模型不得参与。Archive 能力关闭时（P1）为 NULL
+  archive_disposition TEXT CHECK (archive_disposition IN ('required','excluded')),
   -- 归档状态：与 archive_ref 分离，支持"已归档但引用未提交"的崩溃恢复
   archive_state  TEXT NOT NULL DEFAULT 'none'
-                 CHECK (archive_state IN ('none','pending','archived','failed'))
+                 CHECK (archive_state IN ('none','pending','archived','failed','excluded'))
 );
 CREATE INDEX ix_events_persona_status ON events (persona_id, status, received_at);
 CREATE INDEX ix_events_session ON events (session_id, received_at);
@@ -150,7 +152,8 @@ CREATE TABLE schema_migrations (
 |---|---|---|
 | `events.summary` | **必须为 NULL**，或**仅含下表白名单中的非内容元数据** | 任何自然语言摘要、原始消息全文、原文拼接、可还原原文的编码、情感描述、主题概括 |
 | `events.archive_ref` | 不透明引用（ID 或哈希），**不是路径**；**P1 允许 NULL** | 文件路径、可直接读取的 URI、SQL 片段、密钥材料 |
-| `events.archive_state` | 枚举 `none/pending/archived/failed` | 任何原文或可推断原文的附加信息 |
+| `events.archive_state` | 枚举 `none/pending/archived/failed/excluded` | 任何原文或可推断原文的附加信息 |
+| `events.archive_disposition` | 枚举 `required/excluded`（P1 为 NULL） | 模型产出的判定、自由文本理由 |
 | `tasks.payload_json` | **只放引用**：`eventId` / `nodeId` / `threadId` / 参数枚举 | 任何原文、上下文正文、模型输入原文 |
 | `runtime_state.checkpoint_json` | 游标、队列位置、版本号、活跃 ID 列表 | 任何正文、对话片段、思维内容 |
 | 日志 / 遥测 | 计数、耗时、错误码、ID | 默认不记录原文；确需时须脱敏并显式开关 |
@@ -288,7 +291,7 @@ SQLite FTS5 的索引内容默认是**明文**，`node:sqlite` 无法对索引�
 
 当前默认倾向 **A**，但需 P3 基准测试后定案。**在定案前，禁止实现"常驻明文 FTS + 可遗忘内容"的组合。**
 
-相关硬要求（详见 `TRUST-BOUNDARIES.md` §10）：
+相关硬要求（详见 `TRUST-BOUNDARIES.md` §11）：
 
 - `PRAGMA secure_delete = ON`，否则删行不从磁盘抹除。
 - 遗忘事务结束必须 `PRAGMA wal_checkpoint(TRUNCATE)`。
@@ -367,23 +370,38 @@ CREATE TABLE archive_records (
   source       TEXT NOT NULL,
   received_at  INTEGER NOT NULL,
   occurred_at  INTEGER,
-  content_enc  BLOB,                      -- 加密后的原始记录（不得明文）
+  content_enc  BLOB NOT NULL,             -- 加密后的原始记录（不得明文）
   key_id       TEXT NOT NULL,             -- Archive 专属密钥标识（与主观记忆密钥不同域）
-  content_sha256 TEXT NOT NULL,           -- 密文或明文的完整性校验（不可逆）
-  byte_len     INTEGER NOT NULL,
-  retention_class TEXT NOT NULL,          -- 保留策略分级；由管理员策略决定，不属人格可改
+  ciphertext_sha256 TEXT NOT NULL,        -- **密文**完整性校验；禁止用原文普通 SHA-256
+  content_fingerprint TEXT NOT NULL,      -- 键控指纹 HMAC(archiveKey, 明文)，仅用于同 eventId 冲突检测
+  byte_len     INTEGER NOT NULL,          -- 密文字节长度（非原文长度）
+  retention_class TEXT NOT NULL
+                 CHECK (retention_class IN ('standard','restricted','short_lived')),
   created_at   INTEGER NOT NULL
 );
 CREATE INDEX ix_archive_persona ON archive_records (persona_id, received_at);
 CREATE INDEX ix_archive_retention ON archive_records (retention_class, created_at);
 ```
 
-**Archive 表的约束**
+### 5.1 Archive 表字段约束（完整性、指纹、保留）
 
-1. `event_id` 为主键，**天然幂等**：重复归档请求 `INSERT OR IGNORE` / 唯一冲突视为已存在。
-2. `content_enc` **必须**是密文；`key_id` 属 Archive 密钥域，**不得**与 `memory_nodes.key_id` 混用或互相派生。
-3. 本表**不得**被 Brain 侧连接。P1 阶段本表**不创建**（无 Archive Writer）。
-4. 保留策略由 `retention_class` 表达，与主观记忆的 `lifecycle` / `epoch` / 墓碑**完全独立**：
+1. `event_id` 为主键，**天然幂等**：重复归档请求视为已存在，不产生第二条记录。
+2. `content_enc` **必须**是密文。`key_id` 属 Archive 密钥域，**不得**与 `memory_nodes.key_id`
+   混用或互相派生（两套密钥体系独立）。
+3. **完整性校验用密文哈希**：`ciphertext_sha256` 校验"存储未损坏"。
+   **禁止**把原文的普通 SHA-256 作为长期审计元数据保存 —— 短文本的普通哈希
+   可被字典/穷举反推，等于变相留存原文。
+4. **冲突检测用键控指纹**：`content_fingerprint = HMAC(archiveKey, 原文)`。
+   - 同一 `eventId` 再次归档时，比较指纹：相同 → 幂等命中；**不同 → 拒绝覆盖并报告冲突**。
+   - 该指纹**不得**外发给 Brain（IPC 只回 `eventId` / `archiveState` / `archiveRef`），
+     也不得用于跨事件的内容比对。
+   - 指纹随记录与密钥一起销毁，不做长期保留。
+5. `byte_len` 记录**密文**长度，不泄露原文长度（必要时填充到固定分组）。
+6. `retention_class` 只能取 `standard` / `restricted` / `short_lived`。
+   **每条记录必须归属有限期分类**；策略未配置有限保留期时**拒绝归档**，不得默认永久。
+7. 本表**不得**被 Brain 侧连接。P1 阶段本表**不创建**（无 Archive Writer）；
+   `excluded` 事件**不创建**本表记录。
+8. 保留策略与主观记忆的 `lifecycle` / `epoch` / 墓碑**完全独立**：
    遗忘主观记忆**不会**删除 Archive；清理 Archive **不会**改写主观叙述。
 
 ## 6. 版本与纪元
