@@ -83,6 +83,9 @@ CREATE TABLE events (
   persona_id     TEXT NOT NULL REFERENCES personas(id),
   session_id     TEXT REFERENCES sessions(id),
   source         TEXT NOT NULL,            -- minecraft.chat / dsh.chat / qq.group …
+  adapter_id     TEXT NOT NULL,            -- 来源适配器；内部来源用 system.* 正式 ID
+  adapter_event_ref TEXT NOT NULL          -- 适配器侧刺激标识；同一刺激重试必须复用
+                 CHECK (length(adapter_event_ref) BETWEEN 1 AND 64),
   status         TEXT NOT NULL CHECK (status IN
                    ('received','accepted','noticed','understood',
                     'response_committed','acted','rejected','expired')),
@@ -117,6 +120,8 @@ CREATE TABLE events (
 );
 CREATE INDEX ix_events_persona_status ON events (persona_id, status, received_at);
 CREATE INDEX ix_events_session ON events (session_id, received_at);
+-- 去重键：同一适配器、同一来源、同一刺激 → 只映射一个 eventId（见 IDENTITY-PROTOCOL §4.5）
+CREATE UNIQUE INDEX ux_events_dedupe ON events (adapter_id, source, adapter_event_ref);
 
 -- 任务（调度与睡眠周期共用）
 CREATE TABLE tasks (
@@ -168,6 +173,7 @@ CREATE TABLE schema_migrations (
 | `events.archive_ref` | 不透明引用（ID 或哈希），**不是路径**；**P1 允许 NULL** | 文件路径、可直接读取的 URI、SQL 片段、密钥材料 |
 | `events.archive_state` | 枚举 `none/pending/archived/failed/excluded` | 任何原文或可推断原文的附加信息 |
 | `events.archive_disposition` | 枚举 `required/excluded`（P1 为 NULL） | 模型产出的判定、自由文本理由 |
+| `events.adapter_event_ref` | 适配器侧刺激标识：不透明字符串 1–64（`^[A-Za-z0-9._:-]{1,64}$`） | 正文、自由文本、路径、URL、错误消息；与 `eventId` 混用 |
 | `events.status_reason` | 受控枚举，且必须与状态配对（完整清单见 §3.4） | 自由文本、错误消息原文、异常堆栈、任何含内容的片段 |
 | `tasks.payload_json` | **只放引用**：`eventId` / `nodeId` / `threadId` / 参数枚举 | 任何原文、上下文正文、模型输入原文 |
 | `runtime_state.checkpoint_json` | 游标、队列位置、版本号、活跃 ID 列表 | 任何正文、对话片段、思维内容 |

@@ -94,7 +94,8 @@ Soul Harness 是一个**独立运行的认知运行时**，不依赖 DSH、Minec
 三权威域：**Subjective Mind** / **Reliable World・Execution** / **Sealed Archive・Audit**。
 
 > 完整架构见 `OVERVIEW.md`；四条红线与威胁模型见 `TRUST-BOUNDARIES.md`；
-> 表结构见 `DATA-MODEL.md`；状态机见 `RUNTIME-LIFECYCLE.md`；模块依赖见 `MODULES.md`。
+> 表结构见 `DATA-MODEL.md`；状态机见 `RUNTIME-LIFECYCLE.md`；模块依赖见 `MODULES.md`；
+> 六类身份（persona / session / thread / run / event / action）见 `IDENTITY-PROTOCOL.md`。
 
 ## 5. 技术路线与五项冲突决议
 

@@ -30,6 +30,7 @@ DSH / Minecraft / QQ / CLI 都是**可选适配器**；不安装它们，Daemon 
 | [TRUST-BOUNDARIES](docs/architecture/TRUST-BOUNDARIES.md) | 三种权威域、四条红线、威胁模型、遗忘的存储约束 |
 | [DATA-MODEL](docs/architecture/DATA-MODEL.md) | 表结构、原文旁路禁令、迁移规则 |
 | [RUNTIME-LIFECYCLE](docs/architecture/RUNTIME-LIFECYCLE.md) | Daemon / Persona / Thought / Event / Sleep 状态机、刺激流转 |
+| [IDENTITY-PROTOCOL](docs/architecture/IDENTITY-PROTOCOL.md) | 六类核心身份（persona / session / thread / run / event / action）的语义、格式、唯一性与生命周期 |
 | [MODULES](docs/architecture/MODULES.md) | 模块职责、依赖方向、隔离门槛 |
 | [AI-DEVELOPMENT-RULES](docs/architecture/AI-DEVELOPMENT-RULES.md) | 双 AI 协作规范（动手前必读） |
 | [LEGACY-BASELINE](docs/migration/LEGACY-BASELINE.md) | 旧插件冻结基线、数据现状、复用分类 |

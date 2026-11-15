@@ -154,7 +154,8 @@ received → accepted → noticed → understood → response_committed → acte
 | 字段 | 类型 / 格式 | 约束 |
 |---|---|---|
 | `schema` | 常量 `soul.stimulus.v1` | 版本协商 |
-| `eventId` | 字符串 | 由适配器分配，**同一刺激重试必须复用** |
+| **`adapterEventRef`** | 字符串（1–64，受控字符集） | **必填**；适配器**自己的**刺激标识；同一刺激重试**必须复用**。Runtime 据此去重（`(adapterId, source, adapterEventRef)` 唯一） |
+| `eventId` | **不由 Adapter 提供** | 由 Ingress 生成（`evt_`），通过 **ACK 响应返回**给适配器。见 `IDENTITY-PROTOCOL.md` §4.5 |
 | **`requestNonce`** | 字符串，`^[A-Za-z0-9_-]{16,64}$` | **必填**；每次**逻辑投递**一个；同一次投递的内部重试**必须复用**；不得由正文/哈希/计数派生；必须与已认证 `adapterId` 绑定 |
 | `adapterId` | 受控标识符 `^[a-z0-9._-]{1,64}$` | 必须已在注册表登记；**内部来源也用正式 ID（如 `system.sleep`），不得为 NULL** |
 | `source` | 受控标识符，同上 | 必须在注册表登记；须与 `adapterId` 的授权范围一致 |
@@ -327,7 +328,10 @@ Adapter 提交（信封 + 正文）
    判定在 Archive Writer 内部完成（键控指纹，见 `DATA-MODEL.md` §5.1）；Brain 只见错误码。
 3. **同 eventId 重试不得创建第二条事件记录**：`events.id` 是主键，重试走"读取已有行 → 决策"，
    不走"插入新行"。
-4. 恢复流程**不得**改变 `eventId`，**不得**为同一条刺激生成新 `eventId`。
+4. **去重入口是 `adapterEventRef`，不是让适配器报 `eventId`**：适配器只知道自己的引用；
+   Runtime 用 `(adapterId, source, adapterEventRef)` 唯一索引把它映射到同一个 `eventId`
+   （见 `IDENTITY-PROTOCOL.md` §4.5）。`eventId` 由 Runtime 分配，Adapter 不得提交或猜测。
+5. 恢复流程**不得**改变 `eventId`，**不得**为同一条刺激生成新 `eventId`。
 
 **同 eventId 重试决策表**
 
