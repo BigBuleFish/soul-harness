@@ -1,0 +1,9 @@
+{
+  "schema": "soul.archive.append.response.v1",
+  "expect": "valid",
+  "why": "Archived append returns a result code plus the opaque ref; no content.",
+  "doc": {
+    "result": "archived",
+    "archiveRef": "arc-7f3a9c21"
+  }
+}

@@ -10,15 +10,16 @@ DSH / Minecraft / QQ / CLI 都是**可选适配器**；不安装它们，Daemon 
 
 ## 当前状态
 
-**P0：架构冻结与工程规范。** 代码一行未写。
+**P0：架构冻结与工程规范。** 文档主体已完成；首份代码契约包 `packages/contracts` 已落地（SH-004），仍无 Runtime。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | 主计划、ADR、信任边界、数据模型、生命周期、模块边界、身份协议、协作规范 | 文档主体已完成（SH-001 → SH-003.2），待独立审查；**代码为零** |
+| P0 | 主计划、ADR、信任边界、数据模型、生命周期、模块边界、身份协议、协作规范 | 文档主体已完成（SH-001 → SH-003.2）；**`packages/contracts` 已实现（SH-004）**，其余无代码 |
 | P1 | Monorepo 骨架、Daemon 生命周期、Persistence、最小 API | 未开始 |
 | P2+ | 事件接入、记忆网络、激活、自主认知、遗忘、睡眠梦境、外部适配 | 未开始 |
 
-目录和文档存在**不代表**功能完成。任何"已实现"必须以测试与验收记录为凭。
+目录和文档存在**不代表**功能完成。任何"已实现"必须以测试与验收记录为凭
+（目前唯一满足此标准的是 `packages/contracts`，测试命令见其 README）。
 
 ## 文档入口
 
@@ -35,6 +36,12 @@ DSH / Minecraft / QQ / CLI 都是**可选适配器**；不安装它们，Daemon 
 | [AI-DEVELOPMENT-RULES](docs/architecture/AI-DEVELOPMENT-RULES.md) | 双 AI 协作规范（动手前必读） |
 | [LEGACY-BASELINE](docs/migration/LEGACY-BASELINE.md) | 旧插件冻结基线、数据现状、复用分类 |
 | [archive/](docs/archive/README.md) | 历史计划文件（**非现行**，仅作追溯） |
+
+## 代码
+
+| 包 | 内容 | 状态 |
+|---|---|---|
+| [packages/contracts](packages/contracts/README.md) | 协议类型、9 份 JSON Schema、枚举与标识符格式；零运行时依赖、无 IO、不生成 ID | **已实现（协议层）**，含测试与正反 fixtures |
 
 ## 旧系统
 

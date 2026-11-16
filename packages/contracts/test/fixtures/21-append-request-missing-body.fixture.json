@@ -1,0 +1,12 @@
+{
+  "schema": "soul.archive.append.request.v1",
+  "expect": "invalid",
+  "why": "append cannot archive what it never receives: body is mandatory.",
+  "doc": {
+    "eventId": "evt_01JQ8Z7D9R1T3V5X7Z9A1B3DFH",
+    "personaId": "psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC",
+    "source": "minecraft.chat",
+    "receivedAt": 1731700000000,
+    "retentionClass": "standard"
+  }
+}

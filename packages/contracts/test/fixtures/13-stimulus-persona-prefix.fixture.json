@@ -1,0 +1,15 @@
+{
+  "schema": "soul.stimulus.v1",
+  "expect": "invalid",
+  "why": "personaId must use the psn_ prefix; a session id here is a scope confusion.",
+  "doc": {
+    "schema": "soul.stimulus.v1",
+    "personaId": "ses_01JQ8Z4A6N8Q0S3V5W7Y9B1CDE",
+    "adapterId": "minecraft",
+    "source": "minecraft.chat",
+    "adapterEventRef": "mc-7f3a9c21",
+    "requestNonce": "NQ7xK2mR9tVb4Wc8",
+    "receivedAt": 1731700000000,
+    "payload": { "kind": "mc.world", "version": 1 }
+  }
+}

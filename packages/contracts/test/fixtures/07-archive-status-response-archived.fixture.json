@@ -1,0 +1,10 @@
+{
+  "schema": "soul.archive.status.response.v1",
+  "expect": "valid",
+  "why": "Archived status: exactly eventId, archiveState and archiveRef.",
+  "doc": {
+    "eventId": "evt_01JQ8Z7D9R1T3V5X7Z9A1B3DFH",
+    "archiveState": "archived",
+    "archiveRef": "arc-7f3a9c21"
+  }
+}

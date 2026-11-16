@@ -1,0 +1,10 @@
+{
+  "schema": "soul.ack.v1",
+  "expect": "invalid",
+  "why": "An ACK never carries statusReason (decision B3); reasons belong to the status query.",
+  "doc": {
+    "eventId": "evt_01JQ8Z7D9R1T3V5X7Z9A1B3DFH",
+    "status": "accepted",
+    "statusReason": "buffer_lost"
+  }
+}

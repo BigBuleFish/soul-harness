@@ -1,0 +1,8 @@
+{
+  "schema": "soul.archive.compare.response.v1",
+  "expect": "valid",
+  "why": "Compare response is the bare verdict — not even an eventId echo.",
+  "doc": {
+    "result": "match"
+  }
+}

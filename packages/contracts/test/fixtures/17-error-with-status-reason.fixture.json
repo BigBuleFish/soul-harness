@@ -1,0 +1,11 @@
+{
+  "schema": "soul.error.v1",
+  "expect": "invalid",
+  "why": "buffer_lost is a StatusReason, not an ErrorCode: the two vocabularies must not mix.",
+  "doc": {
+    "error": {
+      "code": "buffer_lost",
+      "message": "buffer lost"
+    }
+  }
+}

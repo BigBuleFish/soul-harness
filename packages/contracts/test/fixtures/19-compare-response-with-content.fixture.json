@@ -1,0 +1,9 @@
+{
+  "schema": "soul.archive.compare.response.v1",
+  "expect": "invalid",
+  "why": "Compare response must be the verdict alone; any content field is a leak.",
+  "doc": {
+    "result": "match",
+    "content": "the archived original"
+  }
+}

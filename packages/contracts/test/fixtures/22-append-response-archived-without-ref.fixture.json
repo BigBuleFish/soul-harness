@@ -1,0 +1,8 @@
+{
+  "schema": "soul.archive.append.response.v1",
+  "expect": "invalid",
+  "why": "archived without archiveRef is an incomplete commit and must be rejected.",
+  "doc": {
+    "result": "archived"
+  }
+}
