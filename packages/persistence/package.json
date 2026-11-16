@@ -1,0 +1,34 @@
+{
+  "name": "@soul-harness/persistence",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Soul Harness persistence: SQLite connection, single-writer coordination, transactions, migrations and field mapping. No business semantics, no IO beyond its own database file.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "migrations"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "tsc -p tsconfig.json --noEmit && vitest run"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.19.2"
+  }
+}

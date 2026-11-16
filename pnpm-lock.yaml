@@ -45,6 +45,12 @@ importers:
         specifier: ^8.17.1
         version: 8.20.0
 
+  packages/persistence:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.2
+        version: 24.19.2
+
 packages:
 
   '@cacheable/memory@2.2.0':
