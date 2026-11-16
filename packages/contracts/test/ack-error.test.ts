@@ -61,7 +61,9 @@ describe('error messages come from a fixed catalog', () => {
   });
 
   it('rejects a caller-supplied message for a valid code', () => {
-    const doc = { error: { code: 'schema_invalid', message: 'field requestNonce is too short: abc' } };
+    const doc = {
+      error: { code: 'schema_invalid', message: 'field requestNonce is too short: abc' },
+    };
     expect(isValid(ERROR, doc)).toBe(false);
   });
 

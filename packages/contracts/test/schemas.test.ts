@@ -70,7 +70,9 @@ function isClosed(schema: Readonly<Record<string, unknown>>): boolean {
   }
   return branches.every(
     (branch) =>
-      branch !== null && typeof branch === 'object' && (branch as Record<string, unknown>)['additionalProperties'] === false,
+      branch !== null &&
+      typeof branch === 'object' &&
+      (branch as Record<string, unknown>)['additionalProperties'] === false,
   );
 }
 
@@ -187,7 +189,9 @@ describe('archive responses never expose content', () => {
     expect(appendRequestFields.has('body')).toBe(true);
     expect(compareRequestFields.has('candidateBody')).toBe(true);
 
-    expect(collectPropertyNames(SCHEMAS['soul.archive.append.response.v1']).has('body')).toBe(false);
+    expect(collectPropertyNames(SCHEMAS['soul.archive.append.response.v1']).has('body')).toBe(
+      false,
+    );
     expect(
       collectPropertyNames(SCHEMAS['soul.archive.compare.response.v1']).has('candidateBody'),
     ).toBe(false);

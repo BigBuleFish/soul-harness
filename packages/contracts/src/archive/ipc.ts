@@ -86,10 +86,7 @@ export interface ArchiveAppendError {
  *   error     → errorCode required, archiveRef forbidden
  */
 export type ArchiveAppendResponse =
-  | ArchiveAppendArchived
-  | ArchiveAppendDuplicate
-  | ArchiveAppendConflict
-  | ArchiveAppendError;
+  ArchiveAppendArchived | ArchiveAppendDuplicate | ArchiveAppendConflict | ArchiveAppendError;
 
 /* -------------------------------------------------------------------------- */
 /* status                                                                     */

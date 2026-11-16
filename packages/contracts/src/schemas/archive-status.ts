@@ -40,7 +40,10 @@ export const archiveStatusResponseSchema = {
   allOf: [
     {
       // A handle exists only when the record is actually archived.
-      if: { properties: { archiveState: { enum: ['failed', 'not_found'] } }, required: ['archiveState'] },
+      if: {
+        properties: { archiveState: { enum: ['failed', 'not_found'] } },
+        required: ['archiveState'],
+      },
       then: { properties: { archiveRef: { type: 'null' } } },
     },
     {

@@ -10,12 +10,13 @@ DSH / Minecraft / QQ / CLI 都是**可选适配器**；不安装它们，Daemon 
 
 ## 当前状态
 
-**P0：架构冻结与工程规范。** 文档主体已完成；首份代码契约包 `packages/contracts` 已落地（SH-004），仍无 Runtime。
+**P0：架构冻结与工程规范。** 文档主体已完成；`packages/contracts` 已落地（SH-004）；
+Monorepo 根工程化已完成（SH-005）。仍无 Runtime。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | 主计划、ADR、信任边界、数据模型、生命周期、模块边界、身份协议、协作规范 | 文档主体已完成（SH-001 → SH-003.2）；**`packages/contracts` 已实现（SH-004）**，其余无代码 |
-| P1 | Monorepo 骨架、Daemon 生命周期、Persistence、最小 API | 未开始 |
+| P0 | 主计划、ADR、信任边界、数据模型、生命周期、模块边界、身份协议、协作规范 | 文档主体已完成（SH-001 → SH-003.2）；**`packages/contracts` 已实现（SH-004）** |
+| P1 | Monorepo 骨架、Daemon 生命周期、Persistence、最小 API | **Monorepo 骨架已完成（SH-005）**；Daemon / Persistence / API 未开始 |
 | P2+ | 事件接入、记忆网络、激活、自主认知、遗忘、睡眠梦境、外部适配 | 未开始 |
 
 目录和文档存在**不代表**功能完成。任何"已实现"必须以测试与验收记录为凭
@@ -37,7 +38,23 @@ DSH / Minecraft / QQ / CLI 都是**可选适配器**；不安装它们，Daemon 
 | [LEGACY-BASELINE](docs/migration/LEGACY-BASELINE.md) | 旧插件冻结基线、数据现状、复用分类 |
 | [archive/](docs/archive/README.md) | 历史计划文件（**非现行**，仅作追溯） |
 
-## 代码
+## 仓库结构
+
+```text
+.
+├─ apps/                      # 未来的 soul-daemon / soul-studio（尚未创建）
+├─ packages/
+│  └─ contracts/              # 协议契约包（已实现，零运行时依赖）
+├─ tools/consumer-check/      # 跨包导入验证：按包名导入 ESM + d.ts
+├─ docs/                      # 架构文档（唯一基线）
+├─ .github/workflows/ci.yml   # CI：format / lint / typecheck / test / build / consumer
+├─ package.json               # workspace 根（turbo / eslint / prettier / tsc / vitest）
+├─ pnpm-workspace.yaml        # workspace 成员 + 构建脚本放行
+├─ pnpm-lock.yaml             # 唯一 lockfile
+├─ turbo.json                 # 任务图与缓存
+├─ tsconfig.base.json         # 统一 TS 配置（各包 extends）
+└─ vitest.config.ts           # 统一测试入口（projects: packages/*）
+```
 
 | 包 | 内容 | 状态 |
 |---|---|---|
@@ -53,10 +70,28 @@ DSH / Minecraft / QQ / CLI 都是**可选适配器**；不安装它们，Daemon 
 
 ## 技术栈（锁定）
 
-Node.js 24 LTS（`>=24.15.0 <25`，精确版本待实测锁定）· TypeScript(strict) · pnpm · Turborepo · Fastify · WebSocket ·
+Node.js 24 LTS（`>=24.15.0 <25`）· TypeScript(strict) · pnpm · Turborepo · Fastify · WebSocket ·
 SQLite（`node:sqlite`，WAL，单写入者）· JSON Schema · Vitest · React + Vite + Tailwind + shadcn/ui + Zustand
 
+**版本锁定**：开发环境 Node **24.21.0**（`.nvmrc`，已完整跑通全仓检查）；包管理器 pnpm **11.7.0**
+（根 `package.json` 的 `packageManager`，Corepack 读取）。改这两项需要 ADR。
+
 无 ORM。细节与变更流程见 [AI-DEVELOPMENT-RULES](docs/architecture/AI-DEVELOPMENT-RULES.md) §3。
+
+## 开发命令
+
+```bash
+pnpm install --frozen-lockfile   # 安装（唯一 lockfile 在根）
+pnpm run format:check            # Prettier 检查（代码；docs/ 与 fixtures 不参与）
+pnpm run lint                    # ESLint（flat config，ts + js）
+pnpm run typecheck               # turbo typecheck + 跨包 consumer 类型检查
+pnpm test                        # Vitest（根配置 projects: packages/*）
+pnpm run build                   # turbo build
+pnpm run check:consumer          # 按包名导入 ESM + d.ts 的实际验证
+```
+
+`pnpm run check` 按顺序串联以上全部步骤，与 CI 完全一致；CI 配置见
+[.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 ## 已知限制（必须随发布一起声明）
 

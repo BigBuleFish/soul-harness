@@ -1,0 +1,17 @@
+# Prose is hand-formatted and reviewed as text; running Prettier over it would
+# reflow the whole documentation set for no benefit.
+docs/
+*.md
+README.md
+packages/*/README.md
+
+# Generated / vendored
+**/dist/
+**/node_modules/
+**/.turbo/
+**/coverage/
+pnpm-lock.yaml
+
+# Test fixtures are byte-stable inputs; reformatting them would churn the diffs
+# that exist precisely to be reviewed as data.
+packages/contracts/test/fixtures/

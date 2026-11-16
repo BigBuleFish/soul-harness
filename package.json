@@ -1,0 +1,34 @@
+{
+  "name": "soul-harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Soul Harness 2.0 — independent cognitive runtime (monorepo root).",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=24.15.0 <25",
+    "pnpm": ">=11.7.0 <12"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check:consumer": "tsc -p tools/consumer-check/tsconfig.json && node tools/consumer-check/run.mjs",
+    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run build && pnpm run check:consumer"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@soul-harness/contracts": "workspace:*",
+    "@types/node": "^24.19.2",
+    "eslint": "^10.15.0",
+    "prettier": "^3.6.0",
+    "turbo": "^2.5.0",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.73.0",
+    "vitest": "^3.2.7"
+  }
+}

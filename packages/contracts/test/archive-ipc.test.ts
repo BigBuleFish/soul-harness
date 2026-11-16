@@ -71,16 +71,31 @@ describe('append response — the four legal shapes', () => {
 describe('append response — every illegal combination is rejected', () => {
   const cases: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
     ['archived without archiveRef', { result: 'archived' }],
-    ['archived with errorCode', { result: 'archived', archiveRef: REF, errorCode: 'internal_error' }],
-    ['archived with both and extra', { result: 'archived', archiveRef: REF, errorCode: 'internal_error', body: 'x' }],
+    [
+      'archived with errorCode',
+      { result: 'archived', archiveRef: REF, errorCode: 'internal_error' },
+    ],
+    [
+      'archived with both and extra',
+      { result: 'archived', archiveRef: REF, errorCode: 'internal_error', body: 'x' },
+    ],
     ['duplicate without archiveRef', { result: 'duplicate' }],
-    ['duplicate with errorCode', { result: 'duplicate', archiveRef: REF, errorCode: 'internal_error' }],
+    [
+      'duplicate with errorCode',
+      { result: 'duplicate', archiveRef: REF, errorCode: 'internal_error' },
+    ],
     ['conflict with archiveRef', { result: 'conflict', archiveRef: REF }],
     ['conflict with errorCode', { result: 'conflict', errorCode: 'archive_conflict' }],
     ['conflict with both', { result: 'conflict', archiveRef: REF, errorCode: 'archive_conflict' }],
     ['error without errorCode', { result: 'error' }],
-    ['error with archiveRef', { result: 'error', errorCode: 'archive_unavailable', archiveRef: REF }],
-    ['error with a status reason instead of an error code', { result: 'error', errorCode: 'buffer_lost' }],
+    [
+      'error with archiveRef',
+      { result: 'error', errorCode: 'archive_unavailable', archiveRef: REF },
+    ],
+    [
+      'error with a status reason instead of an error code',
+      { result: 'error', errorCode: 'buffer_lost' },
+    ],
     ['unknown result value', { result: 'ok' }],
     ['missing result', { archiveRef: REF }],
   ];
@@ -137,7 +152,9 @@ describe('status — three fields in, three fields out', () => {
 
   it('rejects events-side archive states the archive cannot observe', () => {
     for (const archiveState of ['none', 'pending', 'excluded']) {
-      expect(isValid(STATUS_RES, { eventId: EVENT_ID, archiveState, archiveRef: null })).toBe(false);
+      expect(isValid(STATUS_RES, { eventId: EVENT_ID, archiveState, archiveRef: null })).toBe(
+        false,
+      );
     }
   });
 
@@ -220,13 +237,24 @@ describe('the three archive interfaces stay separate', () => {
   it('gives each response its own result vocabulary', () => {
     const branches = SCHEMAS[APPEND_RES]['oneOf'] as ReadonlyArray<Record<string, unknown>>;
     const appendResults = branches.map(
-      (entry) => (entry['properties'] as Record<string, Record<string, unknown>>)['result']?.['const'],
+      (entry) =>
+        (entry['properties'] as Record<string, Record<string, unknown>>)['result']?.['const'],
     );
-    const compareProps = SCHEMAS[COMPARE_RES]['properties'] as Record<string, Record<string, unknown>>;
-    const statusProps = SCHEMAS[STATUS_RES]['properties'] as Record<string, Record<string, unknown>>;
+    const compareProps = SCHEMAS[COMPARE_RES]['properties'] as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const statusProps = SCHEMAS[STATUS_RES]['properties'] as Record<
+      string,
+      Record<string, unknown>
+    >;
 
     expect(appendResults).toStrictEqual(['archived', 'duplicate', 'conflict', 'error']);
     expect(compareProps['result']?.['enum']).toStrictEqual(['match', 'conflict', 'not_found']);
-    expect(statusProps['archiveState']?.['enum']).toStrictEqual(['archived', 'failed', 'not_found']);
+    expect(statusProps['archiveState']?.['enum']).toStrictEqual([
+      'archived',
+      'failed',
+      'not_found',
+    ]);
   });
 });

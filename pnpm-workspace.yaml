@@ -1,0 +1,31 @@
+# pnpm workspace definition and settings (pnpm >= 11 reads settings here).
+#
+# Keep this file as the single source of package discovery and build-script
+# allow-listing. SH-005 hoisted it from packages/contracts so that one lockfile
+# and one install covers the whole repo.
+
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+# Dependencies with lifecycle scripts must be listed explicitly.
+# esbuild is pulled in transitively by vitest and needs its install script to
+# resolve the platform binary.
+allowBuilds:
+  esbuild: true
+
+# Entries newer than pnpm's release-age gate must be listed explicitly.
+# pnpm appends them automatically during install; keep them committed so that
+# `--frozen-lockfile` reproduces the same decision on every machine and in CI.
+minimumReleaseAgeExclude:
+  - '@typescript-eslint/eslint-plugin@8.73.0'
+  - '@typescript-eslint/parser@8.73.0'
+  - '@typescript-eslint/project-service@8.73.0'
+  - '@typescript-eslint/scope-manager@8.73.0'
+  - '@typescript-eslint/tsconfig-utils@8.73.0'
+  - '@typescript-eslint/type-utils@8.73.0'
+  - '@typescript-eslint/types@8.73.0'
+  - '@typescript-eslint/typescript-estree@8.73.0'
+  - '@typescript-eslint/utils@8.73.0'
+  - '@typescript-eslint/visitor-keys@8.73.0'
+  - typescript-eslint@8.73.0

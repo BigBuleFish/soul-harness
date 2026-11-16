@@ -63,7 +63,11 @@ export const ERROR_HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
 };
 
 /** Codes an adapter may retry the *same delivery* on. */
-export const RETRYABLE_ERROR_CODES = ['rate_limited', 'archive_unavailable', 'compare_limited'] as const;
+export const RETRYABLE_ERROR_CODES = [
+  'rate_limited',
+  'archive_unavailable',
+  'compare_limited',
+] as const;
 
 export type RetryableErrorCode = (typeof RETRYABLE_ERROR_CODES)[number];
 

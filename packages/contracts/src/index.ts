@@ -162,10 +162,7 @@ export type { ErrorBody, ErrorResponse } from './errors/error-response.js';
 export type { StimulusInputV1, StimulusPayload, StimulusV1 } from './envelope/v1.js';
 export type { AckResponse } from './ack.js';
 
-export {
-  ARCHIVE_APPEND_RESULTS,
-  ARCHIVE_COMPARE_RESULTS,
-} from './archive/ipc.js';
+export { ARCHIVE_APPEND_RESULTS, ARCHIVE_COMPARE_RESULTS } from './archive/ipc.js';
 export type {
   ArchiveAppendArchived,
   ArchiveAppendConflict,

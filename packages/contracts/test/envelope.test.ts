@@ -137,7 +137,9 @@ describe('payload rules — identical at both layers', () => {
 
   it('rejects a non-positive or non-integer payload version', () => {
     for (const version of [0, -1, 1.5, '1']) {
-      expect(isValid(INPUT, { ...baseInput(), payload: { kind: 'mc.world', version } })).toBe(false);
+      expect(isValid(INPUT, { ...baseInput(), payload: { kind: 'mc.world', version } })).toBe(
+        false,
+      );
     }
   });
 });

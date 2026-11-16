@@ -365,6 +365,8 @@ Studio 最小页面、CLI 健康检查、单实例锁。
 
 通过标准：不依赖 DSH 启动；可创建/查询/修改 Persona；数据持久化；Daemon 重启恢复；关闭 Studio 后 Daemon 仍运行。
 
+**当前进度：Monorepo 与 `contracts` 已完成（SH-004 / SH-005）；Daemon、Persistence、API 未开始。**
+
 ### P2 事件接入与 Adapter SDK
 
 交付：Stimulus Schema、事件接入、事件生命周期、Adapter SDK、CLI Adapter、Mock Adapter。
@@ -530,7 +532,7 @@ Archive 被读取 · 假遗忘 · 梦境外溢 · 幻觉动作 · 会话串记�
 | SH-003.1 | persona 作用域、去重命中的正文核对边界、审计表作用域 | **已完成（文档层面）** |
 | SH-003.2 | 身份协议收口：Archive 三接口与 `compare` 边界、适配器去重口径、台账与作用域规则 | **已完成（文档层面）** |
 | SH-004 | Contracts 与 JSON Schema 落地 | **已完成（代码层面）**：`packages/contracts`，含类型、9 份 Schema、正反 fixtures 与测试 |
-| SH-005 | 初始化 Monorepo、构建系统与 CI | 未开始 |
+| SH-005 | 初始化 Monorepo、构建系统与 CI | **已完成（工程化）**：根 workspace / turbo / tsconfig / vitest / eslint+prettier / CI |
 | SH-006 | 实现 Persistence 与 Migration | 未开始 |
 | SH-007 | 实现独立 Daemon 生命周期 | 未开始 |
 | SH-008 | 实现 Runtime 最小功能 | 未开始 |

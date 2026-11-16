@@ -21,7 +21,13 @@
  *     top-level schema, not silently ignored.
  */
 
-import type { AdapterEventRef, AdapterId, PersonaId, RequestNonce, SourceId } from '../ids/types.js';
+import type {
+  AdapterEventRef,
+  AdapterId,
+  PersonaId,
+  RequestNonce,
+  SourceId,
+} from '../ids/types.js';
 import type { JsonObject } from '../json.js';
 import type { StimulusInputVersion, StimulusVersion } from '../version.js';
 

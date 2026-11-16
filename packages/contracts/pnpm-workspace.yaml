@@ -1,8 +1,0 @@
-# pnpm settings for the contracts package (pnpm >= 11 reads settings here).
-#
-# The only dependency with a lifecycle script is esbuild (transitive via vitest).
-# It is allowed to run its install script so that a fresh clone resolves the
-# platform binary deterministically. SH-005 will hoist this file to the
-# Monorepo root; until then the package is self-contained.
-allowBuilds:
-  esbuild: true
