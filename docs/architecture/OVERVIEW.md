@@ -1,6 +1,6 @@
 # OVERVIEW — Soul Harness 总体架构
 
-- **地位**：本文件与 `TRUST-BOUNDARIES.md`、`DATA-MODEL.md`、`RUNTIME-LIFECYCLE.md`、`AI-DEVELOPMENT-RULES.md` 共同构成**唯一架构基线**。
+- **地位**：本文件与 `TRUST-BOUNDARIES.md`、`DATA-MODEL.md`、`RUNTIME-LIFECYCLE.md`、`MODULES.md`、`IDENTITY-PROTOCOL.md`、`AI-DEVELOPMENT-RULES.md` 共同构成**唯一架构基线**。
 - **状态**：设计中。系统尚未实现，本文描述目标形态，不代表已有功能。
 - **上位决策**：`docs/adr/ADR-001-independent-runtime.md`
 
@@ -98,6 +98,9 @@ Soul Harness 是一个**独立常驻的认知运行时**：人格身份、主观
 | `eventId` | 一个外部已发生的观察 | 永久唯一 | — |
 
 **禁止"猜最近活跃会话是谁"的隐式解析。** 所有接口显式携带 `personaId`，必要时带 `sessionId` / `threadId` 与权限上下文。
+
+> 本表只是概览。六类身份的格式、生成者、唯一性范围与生命周期以 **`IDENTITY-PROTOCOL.md`** 为准
+> （含"`eventId` 由 Ingress 生成、适配器只提供 `adapterEventRef`"这条关键分工）。
 
 ## 6. 三种权威域（详见 TRUST-BOUNDARIES.md）
 

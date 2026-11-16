@@ -13,7 +13,8 @@
 4. `docs/architecture/DATA-MODEL.md` — 数据怎么存
 5. `docs/architecture/RUNTIME-LIFECYCLE.md` — 状态怎么流转
 6. `docs/architecture/MODULES.md` — 你的任务能碰哪里
-7. 目标模块的 `README.md`
+7. `docs/architecture/IDENTITY-PROTOCOL.md` — 谁是谁（六类 ID 与去重身份）
+8. 目标模块的 `README.md`
 
 **没读完就写代码 = 违规。** 产出与文档冲突时，先停手提变更，不许"先写了再说"。
 

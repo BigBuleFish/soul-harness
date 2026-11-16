@@ -46,7 +46,7 @@
 |---|---|---|---|
 | `contracts` | 协议类型、JSON Schema（**含 Stimulus 信封与 `requestNonce` 校验规则**）、**身份 ID 格式与生成契约**（`IDENTITY-PROTOCOL.md`）、版本与能力常量 | 运行时逻辑、IO、状态、**数据库列映射**、注册表查询、**不实际分配 ID** | 未实现 |
 | `persistence` | SQLite 连接、单写入协调器、事务、migration、检查点、密钥指针、**camelCase↔snake_case 映射** | 业务语义；不判断"该不该记" | 未实现 |
-| `runtime` | Persona 生命周期、事件总线、任务队列、状态恢复（**pending 归档恢复 + failed 缓冲清理两类扫描**）、提案验证与提交、版本/epoch 控制、**归档决策与冲突审计记录写入**、**六类身份 ID 的分配**（见 `IDENTITY-PROTOCOL.md`） | 语义解释；不生成回答；**不读 Archive**；不接受外部指定的内部 ID | 未实现 |
+| `runtime` | Persona 生命周期、事件总线、任务队列、状态恢复（**pending 归档恢复 + failed 缓冲清理两类扫描**）、提案验证与提交、版本/epoch 控制、**归档决策与冲突审计记录写入**、**六类身份 ID 的分配**（见 `IDENTITY-PROTOCOL.md`）、**入站去重与去重命中后的正文核对**（`compare` 的**唯一**调用方） | 语义解释；不生成回答；**不读 Archive**、不持有 Archive 密钥；不接受外部指定的内部 ID | 未实现 |
 | `personality` | 自我叙事、情绪、关系多维表征、特质缓变 | 不写记忆正文；不授权现实动作 | 未实现 |
 | `attention` | 前注意过滤、优先级、唤醒分级、注意结果（ignored/queued/aware） | 不理解内容；不生成回应 | 未实现 |
 | `perception` | 感知规范化、选择性编码判定、短暂缓冲（TTL） | 不长期保存原文；不建立关联 | 未实现 |
@@ -57,7 +57,7 @@
 | `sleep-dream` | 睡眠功能周期调度、Dream Sandbox、场景生成与体验者隔离、醒后切换 | 无真实工具/网络/文件权限；**不得仅靠 Worker Thread 隔离** | 未实现 |
 | `models` | 多供应商路由、质量分层、用量与失败记录、结构化提案解析 | 不校验业务权限；不直接写库 | 未实现 |
 | `action-gateway` | 现实权限校验、幂等、执行、回执、撤销。**独立进程**，达门槛才启用 | 不解释意图；不持有主观记忆 | 未实现 |
-| `archive-writer` | 原始记录**加密**落盘（AEAD 独立密钥、HMAC 指纹密钥另置）、密文完整性校验、`expires_at` 有限期保留、按 `eventId` 幂等（**同 ID 重试不得二次 append**）、同 ID 异内容**拒绝覆盖并报冲突**；对外三个接口：**`append`（写）**、**`status`（只回 eventId/state/ref）**、**`compare`（只回 match/conflict/not_found，不回内容）**。**唯一写入者 + 独立进程 + 独立权限**，达门槛才启用 | **不向 Brain 提供任何读取接口或密钥**；`status` / `compare` 均不返回原文/密文/指纹/长度；不解释内容；不参与主观记忆 | 未实现 |
+| `archive-writer` | 原始记录**加密**落盘（AEAD 独立密钥、HMAC 指纹密钥另置）、密文完整性校验、`expires_at` 有限期保留、按 `eventId` 幂等（**同 ID 重试不得二次 append**）、同 ID 异内容**拒绝覆盖并报冲突**；对外三个接口：**`append`（写）**、**`status`（只回 eventId/state/ref）**、**`compare`（只回 match/conflict/not_found，不回内容；仅 Ingress 去重路径可调，且不解密）**。**唯一写入者 + 独立进程 + 独立权限**，达门槛才启用 | **不向 Brain 提供任何读取接口或密钥**；`status` / `compare` 均不返回原文/密文/指纹/长度；不解释内容；不参与主观记忆 | 未实现 |
 | `adapter-sdk` | 适配器协议、可信信封（**含 `requestNonce` 格式约束**）、来源鉴别、重试与限流契约、**适配器注册表**（合法 `adapterId` / `source`） | 不含具体平台实现；不持有状态；不做正则或注册校验的具体执行 | 未实现 |
 
 ## 3. 每个模块的允许依赖
@@ -77,7 +77,7 @@
 | `sleep-dream` | contracts, persistence, memory-graph, models | 睡眠周期、梦境会话 |
 | `models` | contracts | `propose(kind, input)` → 校验前的原始提案 |
 | `action-gateway` | contracts | `request` / `receipt` / `revoke`（独立进程） |
-| `archive-writer` | contracts, persistence | `append`（只写；无 `read`） |
+| `archive-writer` | contracts, persistence | `append` / `status` / `compare`（**无 `read`**；`status` 只回三字段、`compare` 只回判定） |
 | `adapter-sdk` | contracts | 适配器接口定义与校验工具 |
 
 **注**：`runtime` 允许依赖很多模块，但**它不被任何模块依赖**（除 apps）。这保证编排逻辑只有一处。
@@ -119,7 +119,7 @@ P1 只有单库单进程，**不具备物理隔离**（见 `TRUST-BOUNDARIES.md`
 
 | 模块 | 门槛 | 未达门槛时 |
 |---|---|---|
-| `archive-writer` | 独立 db 文件 + 独立进程 + Brain 无读权限与无密钥 + 加密存储 + 按 `eventId` 幂等 + 受限状态 IPC + 有限期保留分类 + 句柄审计 | **仍允许接收事件**（P1 决议）：正文随感知缓冲 TTL 删除，`disposition` 为 NULL、`archive_state='none'`、`archive_ref` 为 NULL，**不承诺审计能力** |
+| `archive-writer` | 独立 db 文件 + 独立进程 + Brain 无读权限与无密钥 + 加密存储 + 按 `eventId` 幂等 + 受限 IPC（`append` / `status` / `compare`） + 有限期保留分类 + 句柄审计 | **仍允许接收事件**（P1 决议）：正文随感知缓冲 TTL 删除，`disposition` 为 NULL、`archive_state='none'`、`archive_ref` 为 NULL，**不承诺审计能力** |
 | `action-gateway` | 独立进程 + 独立令牌 + 幂等持久化 + 回执校验 + 重复执行=0 测试 | 不执行任何真实外部动作 |
 | `sleep-dream`（梦境部分） | **独立进程**（非 Worker）+ 无网络/无文件写/无工具令牌 + 逃逸测试 | 梦境不启用；睡眠的记忆巩固可先做（不涉及执行权限） |
 

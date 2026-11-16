@@ -173,6 +173,15 @@ Adapter 提交（信封 + 正文）
 [1] Ingress 鉴权与校验：鉴权、来源、限流、协议版本、信封 Schema
    │  ✗ 失败 → status=rejected（正文立即丢弃，不落任何存储，不归档，不 ACK）
    ▼
+[1D] 去重判定：计算 (personaId, adapterId, source, adapterEventRef)，查唯一索引
+   │   ├── 未命中 → **分配新 eventId（evt_）** → 进入 [2]
+   │   ├── 命中 + required 且已归档 → archive.compare
+   │   │        match    → 返回既有 eventId 与状态，**不新建任何行**
+   │   │        conflict → 409（原事件不动 + 冲突审计，见 §7.3）
+   │   ├── 命中 + required 且 pending → 缓冲仍在则与缓冲比对；缓冲已丢 → 只幂等命中
+   │   └── 命中 + excluded / P1       → **无法核对**，只幂等命中，本次正文丢弃
+   │        （命中路径**不写缓冲、不写事件行、不调用 append**，到此结束）
+   ▼
 [2] 写入短暂感知缓冲（TTL，默认 60s，可配）
    │     └── 正文此刻**只存在于**该缓冲
    ▼
@@ -183,7 +192,7 @@ Adapter 提交（信封 + 正文）
    │   [3P] **短事务**：写入 metadata-only pending 事件行                 │
    │         `status='received'`、`archive_state='pending'`、            │
    │         `archive_ref=NULL`、**无正文**                              │
-   │         ✗ 失败 → 503，**不 ACK**（适配器可同 eventId 重投）           │
+   │         ✗ 失败 → 503，**不 ACK**（适配器可同 adapterEventRef 重投）  │
    │                                                                  │
    │   [3R] Archive Writer `append`（加密，按 eventId 幂等）              │
    │         ✗ 失败 → 有界重试 → 耗尽则 503                              │
@@ -231,6 +240,8 @@ Adapter 提交（信封 + 正文）
 | 9 | 归档**不得**因 [4] 的 `ignored` 而跳过；`required` 事件的归档先于注意判定 |
 | 10 | 崩溃后可扫描到**所有**未完成的 pending 记录（`archive_state='pending'`），不得有"看不见的中间态" |
 | 11 | P1（Archive 关闭）：`archive_state='none'`，正文随 TTL 删除，**不承诺任何原始事件审计能力** |
+| 12 | **去重先于缓冲与 disposition**：命中去重键的投递**不得**写入感知缓冲、**不得**写事件行、**不得**调用 `append` |
+| 13 | `compare` 只在 [1D] 命中 `required` 且已归档时调用，**每个投递最多一次**；未命中路径**不得**调用（边界见 `TRUST-BOUNDARIES.md` §5.5） |
 
 ### 7.2 Archive 存储语义与 P1 决议
 
@@ -332,7 +343,10 @@ Adapter 提交（信封 + 正文）
    Runtime 用 `(personaId, adapterId, source, adapterEventRef)` 唯一索引把它映射到同一个 `eventId`
    （见 `IDENTITY-PROTOCOL.md` §4.5）。命中后还要做**正文核对**（§4.5.1）：
    `required` 且已归档 → 调 `archive.compare` 得 `match`/`conflict`；
-   `excluded` 或 P1 → **无法核对，只能幂等命中**，不得声称"内容已去重"。
+   `excluded` 或 P1 → **无法核对，只能幂等命中**，不得声称"内容已去重"；
+   无法核对时只累加**指标** `dedupe.body_unverifiable`（结构化日志不含内容），
+   **不改变事件状态、不建表、不新增原因码**。
+   `compare` 的调用者、绑定与防护见 `TRUST-BOUNDARIES.md` §5.5：仅 [1D] 命中路径、每投递最多一次。
    `eventId` 由 Runtime 分配，Adapter 不得提交或猜测。
 5. 恢复流程**不得**改变 `eventId`，**不得**为同一条刺激生成新 `eventId`。
 
@@ -345,6 +359,7 @@ Adapter 提交（信封 + 正文）
 | 3 | Archive 未写入，缓冲已丢失 | IPC `not_found`，且缓冲已随崩溃/过期失效 | 标 `status='expired'`，原因码 `buffer_lost`；`archive_state='failed'` | 凭空恢复正文；用新 `eventId` 伪装成原事件重试 |
 | 4 | 已 `accepted` | 事件行 `status='accepted'` | 只返回已有状态（含 `archive_ref` 是否存在） | 重复归档；重复进入认知流程（不得二次编码/二次应答） |
 | 5 | 同 eventId 不同正文 | Archive 侧指纹不匹配 | 见下方"冲突处理"：原事件不动 + 409 + 冲突审计 | 覆盖原记录；静默接受；**改写原事件状态** |
+| 6 | 已终态（`expired` / `rejected`） | 去重键命中，事件行 `status ∈ {expired, rejected}` | 只返回既有终态。适配器若要**重新投递**，必须改用**新的 `adapterEventRef` + 新的 `requestNonce`**，由 [1D] 生成新 `eventId` | 重开或改写终态；为同一次投递更换 `eventId`；重写 pending |
 
 **关键区分**
 
@@ -358,7 +373,7 @@ Adapter 提交（信封 + 正文）
 **恢复流程（Brain 不直连 Archive）**
 
 1. **Brain 不允许直接连接 Archive 数据库**：无连接串、无句柄、无密钥。
-2. 恢复只能通过 **Archive Writer 的受限状态查询 IPC**，取得三项**且只此三项**：
+2. 恢复只能通过 **Archive Writer 的 `status` 受限 IPC**（**不是** `compare`），取得三项**且只此三项**：
    `eventId`、`archiveState`、`archiveRef`。
 3. **不得**返回：原文、密文、解密内容、内容指纹、字节长度、密钥信息、任何可推断内容的字段。
 4. 恢复扫描必须有界（批量 + 限速），不得在启动时全表扫描。
@@ -374,7 +389,7 @@ t2  崩溃                                        events 仍是 pending，无 ar
  R1  启动：有界扫描 archive_state='pending'
  R2  IPC archive.status(eventId)  →  archived
  R3  短事务：写 archive_ref + archive_state='archived' + status='accepted'
- R4  完成。适配器若重投同一 eventId → 幂等返回已接受
+ R4  完成。适配器若重投同一 adapterEventRef → 命中已 accepted 的事件，幂等返回既有状态
 ```
 
 ```
@@ -385,7 +400,9 @@ t1' 崩溃（**Archive 尚未写入**）
  R3  进程已重启，**感知缓冲已随内存消失，正文无法重放**
      → 标记 archive_state='failed'、status='expired'（原因码 buffer_lost）
      → **不重建、不推测、不伪造归档记录**
- R4  适配器重投同一 eventId → 进入正常流程（重新写 pending、重新归档）
+ R4  适配器重投同一 adapterEventRef → 命中已 expired 的事件，**只返回既有终态**
+      （终态不重开。若要重新投递，必须使用新的 adapterEventRef + 新的 requestNonce，
+        由 [1D] 生成新 eventId；见 §7.3 决策表情形 6）
 ```
 
 **关键取舍**：崩溃后**不允许**为了"补齐"而从 Archive 反向读取正文（那会让 Archive 变成主观记忆的输入源）。
@@ -489,7 +506,8 @@ Archive append → 指纹不匹配 → 返回 conflict
    **审计与记忆是两件事** —— `required` 事件即使没被记住，原文仍在 Archive。
 4. `excluded` 与 P1 事件：`accepted` 之后系统仍可能不保留任何内容，且**永远无法补查**。
 5. Adapter SDK 必须逐条写明上表，禁止把 `accepted` 解释为"已存档"或"已记住"或"已处理完"。
-6. 对 `required` 源，Adapter 必须处理 503：退避重试、同一 `eventId` 重投，**不得**换新 ID。
+6. 对 `required` 源，Adapter 必须处理 503：退避重试时**复用同一 `adapterEventRef` 与同一 `requestNonce`**；
+   适配器**不持有、也不需要保存内部 `eventId`**（见 `IDENTITY-PROTOCOL.md` §4.5）。
 
 ### 7.5 队列溢出与事件重试
 
@@ -497,7 +515,7 @@ Archive append → 指纹不匹配 → 返回 conflict
 |---|---|
 | 同一会话队列满 | 新事件 `status = expired`（`queue_overflow`）；对适配器回 429，**不静默丢弃** |
 | 事件超过 TTL 仍未注意 | `status = expired`；缓冲删除 |
-| 适配器重投同一 `eventId` | 按 `eventId` 幂等：已存在则不重复处理，返回已有状态 |
+| 适配器重投同一 `adapterEventRef` | 按去重键幂等：已存在则不重复处理，返回已有状态（含终态） |
 | 处理失败（非 Archive） | 有限重试（默认 3 次），超限 `status='rejected'`，原因码 `processing_failed`（受控枚举，见 `DATA-MODEL.md` §3.4）；不进主观记忆 |
 | 迟到事件（`occurred_at` 远早于 `received_at`） | 允许处理，但 `subjective_time` 必须用 `occurred_at` 与接收时间共同表达，不得伪装成"刚刚发生" |
 

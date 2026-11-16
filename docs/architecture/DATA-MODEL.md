@@ -24,6 +24,14 @@
 布尔字段用 `INTEGER` 0/1，不用 SQLite 的松散类型。
 结构化内容用 `TEXT` 存 JSON，且必须带 `schema` 字段标识版本。
 
+**persona 作用域（规则见 `IDENTITY-PROTOCOL.md` §1 第 5 条）**：本文件的表分三类，不得一刀切。
+
+| 类别 | `persona_id` | 本文件中的表 |
+|---|---|---|
+| 人格数据表 | **必须 `NOT NULL`** | `sessions` / `events` / `tasks` / `runtime_state` / `memory_nodes` / `memory_fragments` / `memory_edges` / `thought_threads` / `dream_sessions` / `action_records` / `archive_records` / `archive_decisions` / `archive_conflict_records` / `erasure_tombstones` |
+| 全局系统表 | **不带** | `schema_migrations`（`personas` 以自身 `id` 为主键） |
+| 派生索引 / 易失缓存 | 可带可不带；**不带时必须限定单一人格** | `memory_fts`（不带，经 `node_id` 限定，可重建）/ `activation_states`（带 `persona_id`，可重建） |
+
 ## 2. 权威关系
 
 ```
@@ -68,16 +76,20 @@ CREATE TABLE sessions (
   id          TEXT PRIMARY KEY,            -- sessionId
   persona_id  TEXT NOT NULL REFERENCES personas(id),
   adapter_id  TEXT NOT NULL,               -- dsh / minecraft / qq / cli
-  external_id TEXT,                        -- 适配器侧原始会话标识
+  external_id TEXT,                        -- 适配器侧会话引用 externalSessionRef；不透明，不参与权限判断
   opened_at   INTEGER NOT NULL,
   closed_at   INTEGER,
   meta_json   TEXT
 );
 CREATE INDEX ix_sessions_persona ON sessions (persona_id, opened_at DESC);
--- 会话映射以人格为作用域：同一适配器同一外部会话在不同人格下是不同会话
+-- 会话映射以人格为作用域：同一适配器同一外部会话在不同人格下是不同会话。
+-- 谓词含 closed_at IS NULL：只约束"当前有效"的映射 —— 旧会话关闭后，同一
+-- (persona_id, adapter_id, external_id) 允许再建新会话（重开 = 新 sessionId，见 IDENTITY-PROTOCOL §4.2）。
+-- 并发：关闭与新建必须走同一 persona 级单写入协调器（RUNTIME-LIFECYCLE §9）；本索引是第二道防线，
+-- 保证任何时刻不会存在两条 closed_at IS NULL 的同键映射。
 CREATE UNIQUE INDEX ux_sessions_external
   ON sessions (persona_id, adapter_id, external_id)
-  WHERE external_id IS NOT NULL;
+  WHERE external_id IS NOT NULL AND closed_at IS NULL;
 
 -- 事件（Reliable World 的观察记录）
 -- 注意：本表只存信封与非内容元数据；原始正文归 Archive（加密），通过 archive_ref 指向。
@@ -98,7 +110,7 @@ CREATE TABLE events (
                    ('not_evaluated','ignored','queued','partially_aware','fully_aware','forced_control')),
   salience       REAL NOT NULL DEFAULT 0,
   summary        TEXT,                     -- ⚠ 必须为 NULL 或仅含白名单非内容元数据（见 §3.1）
-  archive_ref    TEXT,                     -- 不透明引用；P1 允许 NULL（无 Archive 时）
+  archive_ref    TEXT,                     -- 不透明引用 token，由 Archive Writer 在 append 时生成；P1 恒为 NULL
   received_at    INTEGER NOT NULL,
   occurred_at    INTEGER,
   updated_at     INTEGER NOT NULL,
@@ -175,7 +187,7 @@ CREATE TABLE schema_migrations (
 | 位置 | 允许存什么 | 明确禁止 |
 |---|---|---|
 | `events.summary` | **必须为 NULL**，或**仅含下表白名单中的非内容元数据** | 任何自然语言摘要、原始消息全文、原文拼接、可还原原文的编码、情感描述、主题概括 |
-| `events.archive_ref` | 不透明引用（ID 或哈希），**不是路径**；**P1 允许 NULL** | 文件路径、可直接读取的 URI、SQL 片段、密钥材料 |
+| `events.archive_ref` | 不透明 token `^[A-Za-z0-9._:-]{1,128}$`，**由 Archive Writer 在 `append` 成功时生成**，Brain 只透传；**不是路径**；**P1 恒为 NULL** | 文件路径、可直接读取的 URI、SQL 片段、密钥材料、原文或原文哈希 |
 | `events.archive_state` | 枚举 `none/pending/archived/failed/excluded` | 任何原文或可推断原文的附加信息 |
 | `events.archive_disposition` | 枚举 `required/excluded`（P1 为 NULL） | 模型产出的判定、自由文本理由 |
 | `events.adapter_event_ref` | 适配器侧刺激标识：不透明字符串 1–64（`^[A-Za-z0-9._:-]{1,64}$`） | 正文、自由文本、路径、URL、错误消息；与 `eventId` 混用 |
@@ -359,6 +371,7 @@ CREATE INDEX ix_nodes_persona_lifecycle ON memory_nodes (persona_id, lifecycle, 
 
 CREATE TABLE memory_fragments (           -- 片段级存储，供遗忘按片段精确删除
   id          TEXT PRIMARY KEY,
+  persona_id  TEXT NOT NULL REFERENCES personas(id),  -- 人格数据表：必须带作用域（IDENTITY-PROTOCOL §1 第 5 条）
   node_id     TEXT NOT NULL REFERENCES memory_nodes(id),
   ordinal     INTEGER NOT NULL,
   content_enc BLOB,
@@ -408,6 +421,8 @@ CREATE TABLE thought_threads (
 CREATE INDEX ix_threads_persona_state ON thought_threads (persona_id, state, priority DESC);
 
 -- 词法索引。⚠ 默认明文，可遗忘内容不得直接进入常驻索引（见下方 §4.1）
+-- 派生索引：可从 memory_nodes 重建，**不强制**带 persona_id；但任何查询必须经 node_id 限定到
+-- 单一人格，遗忘/擦除时必须同步删除（TRUST-BOUNDARIES §11.1，IDENTITY-PROTOCOL §1 第 5 条）。
 CREATE VIRTUAL TABLE memory_fts USING fts5(node_id UNINDEXED, body, tokenize = 'unicode61');
 ```
 
@@ -536,7 +551,7 @@ CREATE INDEX ix_decisions_policy ON archive_decisions (policy_id, policy_version
 -- 归档冲突记录：只记"某 eventId 出现了异内容重投"，不记内容本身。
 -- 归属：Reliable World / 审计侧；由 runtime 在收到 append 返回 conflict 时写入。
 CREATE TABLE archive_conflict_records (
-  id            TEXT PRIMARY KEY,        -- 冲突事件自身 ID（**不是** eventId，不得冒充原事件）
+  id            TEXT PRIMARY KEY,        -- 冲突记录 ID（`cnf_` 前缀，见 IDENTITY-PROTOCOL §3.1/§3.4）；**不是** eventId
   event_id      TEXT NOT NULL,           -- 被冲突的原事件
   persona_id    TEXT NOT NULL,           -- 作用域：审计也必须可按人格隔离
   detected_at   INTEGER NOT NULL,

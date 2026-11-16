@@ -46,8 +46,11 @@ Soul Harness 要求"记忆可以被真实遗忘，也能形成虚假自传"，�
 - Archive 拥有**独立的保留与删除策略**，与主观记忆的遗忘流程分开管理。
 - **不得**把 Archive 内容导入主观记忆当作"隐藏正确答案"；它只能作为**新观察**从 Ingress 重新进入。
 - 完整性校验只用**密文哈希**；**禁止**把原文的普通 SHA-256 作为长期审计元数据保存。
-- Brain 侧唯一可用的 Archive 交互是**受限 IPC**，且只返回 `eventId` / `archiveState` / `archiveRef`；
-  不得返回原文、密文、解密内容、指纹或长度。
+- Brain 侧可用的 Archive 交互**只有三个受限 IPC**：`append`（提交归档）、`status`（只返回
+  `eventId` / `archiveState` / `archiveRef`）、`compare`（只返回 `match` / `conflict` / `not_found`）。
+  三者**都不得**返回原文、密文、解密内容、指纹、长度或密钥信息。
+- `compare` 是**等值判定**而非读取，且**不解密** Archive（只用 `mac_key` 算 HMAC）；
+  其调用者、绑定字段与滥用防护见 §5.5。
 
 **测试方式**：以 Brain 身份尝试 Archive 的每一条已知路径（文件、连接、工具、API），全部必须失败；
 以 Brain 身份尝试解密 Archive 数据必须失败（无密钥）；
@@ -114,7 +117,7 @@ Soul Harness 要求"记忆可以被真实遗忘，也能形成虚假自传"，�
 
 | 能力 | 启用前必须满足 | 未达门槛时 |
 |---|---|---|
-| **Sealed Archive** | 独立 db 文件 + 独立进程 + 独立文件权限（Brain 账号无读权）+ Brain 侧不编译其客户端 + **加密存储 + 独立密钥** + 按 `eventId` 幂等 + **受限 IPC（只回状态）** + **有限期保留分类** + 句柄审计通过 | **允许接收事件，但不归档**：正文随感知缓冲 TTL 删除，`archive_disposition` 为 NULL、`archive_state='none'`，**不承诺原始事件审计能力**（见 `RUNTIME-LIFECYCLE.md` §7.2） |
+| **Sealed Archive** | 独立 db 文件 + 独立进程 + 独立文件权限（Brain 账号无读权）+ Brain 侧不编译其客户端 + **加密存储 + 独立密钥** + 按 `eventId` 幂等 + **受限 IPC（`append` / `status` / `compare`，均不回内容）** + **有限期保留分类** + 句柄审计通过 | **允许接收事件，但不归档**：正文随感知缓冲 TTL 删除，`archive_disposition` 为 NULL、`archive_state='none'`，**不承诺原始事件审计能力**（见 `RUNTIME-LIFECYCLE.md` §7.2） |
 | **Action Gateway** | 独立进程 + 独立能力令牌 + 幂等键持久化 + 回执校验 + "重复执行 = 0"测试 | 不启用任何真实外部动作 |
 | **Dream Sandbox** | **独立进程**（不是 Worker Thread）+ 无网络 + 无文件写 + 无真实工具令牌 + 逃逸测试通过 | 不启用梦境 |
 
@@ -175,15 +178,23 @@ Archive 是**记录域**，不是记忆域。二者在密钥、写入者、保�
   且必须可独立轮换。理由：指纹参与比对（相对开放的路径），加密密钥只用于解密（严格路径）；
   合并二者会把"能比对"升级成"能解密"。
 
-**接口划分（append 与查询分离）**
+**接口划分（三个接口，请求与响应分别定义）**
 
-| 接口 | 用途 | 返回 | 权限 |
+| 接口 | 请求（**可含必要正文**） | 响应（**永不含内容**） | 权限 |
 |---|---|---|---|
-| `archive.append(eventId, ciphertextRef, …)` | 写入/幂等 | `archived` / `duplicate` / `conflict` / `error` | 仅入站路径可调用 |
-| `archive.status(eventId)` | 恢复与对账 | **只有** `eventId` / `archiveState` / `archiveRef` | 受限；不得返回任何内容 |
+| `append` | `eventId`、`personaId`、`source`、`receivedAt`、`occurredAt?`、`retentionClass`、**待归档原文** | `archived` / `duplicate` / `conflict` / `error`；成功时附 `archiveRef` | 仅入站路径可调用 |
+| `status` | `eventId` | **只有** `eventId` / `archiveState`（`archived` / `failed` / `not_found`）/ `archiveRef` | 受限；不得返回任何内容 |
+| `compare` | `eventId`、`personaId`、`adapterId`、`source`、`requestNonce`、**候选正文** | **只有** `match` / `conflict` / `not_found` | **仅 Ingress 去重路径**，见 §5.5 |
 
-- **状态查询绝不返回内容**：不返回原文、密文、解密结果、指纹、长度、密钥信息。
-- 两个接口**不得合并**为一个"通用查询"。
+- **请求可以包含必要的正文输入**：`append` 需要待归档原文，`compare` 需要候选正文；
+  两者都只在**进程间内存**中传递（传输约束见 §5.5）。
+- **响应一律不得返回**原文、密文、解密内容、指纹、字节长度与密钥信息。`append` 只多回一个
+  `archiveRef`（不透明 token），`status` 只回状态与引用，`compare` 只回三值判定。
+- `status` 的请求**只需** `eventId`：它的响应不含内容，且 `eventId` 在部署内唯一。
+  `compare` 额外绑定 `personaId` / `adapterId` / `source` / `requestNonce`，是因为它会对**正文**给出判定（§5.5）。
+- 三个接口**不得合并**为一个"通用查询"，也**不得**新增第四个"随便读点什么"的接口。
+  三套请求与响应在 `contracts` 中必须**分别定义**，不得用一个通用结果类型混装。
+- `compare` 内部用 `HMAC(mac_key, 候选正文)` 与已存 `content_fingerprint` 比对，**全程不解密** `content_enc`。
 
 **归档决策审计**
 
@@ -222,6 +233,64 @@ Archive 是**记录域**，不是记忆域。二者在密钥、写入者、保�
   失败重试耗尽返回 **503**；**不得**降级为 `excluded`。
 - `excluded` 与 P1 事件：正常 ACK，但**不提供审计能力**。
 
+### 5.5 `archive.compare` 的调用边界（SH-003.2）
+
+`compare` 是 SH-003 为解决"去重命中后正文是否一致"引入的第三个接口。它**不是读取通道**，
+但它是 Brain 侧唯一能对归档内容做出判定的能力，因此必须单独划线。
+
+**唯一调用者**
+
+| 允许 | 禁止 |
+|---|---|
+| `runtime` 的 **Ingress 去重路径**：仅在 `(personaId, adapterId, source, adapterEventRef)` 命中已有事件时调用一次 | 模型、`cognition`、主观记忆写入路径、Studio、CLI、`action-gateway`、任何 Adapter |
+| 经 `archive.compare` scope 的受限 IPC 令牌 | 通过 HTTP / WS / 任何对外 API 暴露；编进 `adapter-sdk` |
+
+- **未命中去重键时不得调用 `compare`**：新事件直接走 [2] 缓冲与 [3] 归档，没有"先问一句"这一步。
+- 每个投递**最多调用一次**，不得对同一次投递循环调用。
+
+**绑定字段（缺一不可）**
+
+> 请求与响应字段的权威定义在 §5.4 的接口表；本节只规定 `compare` 的调用条件与防护。
+
+IPC 请求必须同时携带：`eventId`、`personaId`、`adapterId`、`source`、`requestNonce`（本次投递）。
+
+- Archive Writer 校验：`archive_records.event_id` 存在，且其 `persona_id` 与请求一致。
+- **不一致一律回 `not_found`**，不区分"事件不存在"与"跨人格访问"，避免退化成探测接口。
+- `adapterId` / `source` / `requestNonce` 归档侧**不存**，由调用方（Ingress）保证与本条去重记录一致，
+  并在异常审计里作为身份字段使用（不含内容）。
+
+**返回值的三条禁令**
+
+1. 判定结果**只能**用于本次投递的响应码（200 / 409）与是否继续 `append`；**不得**写入 `events` 任何列、
+   `summary` 类字段、`tasks.payload_json`、`runtime_state.checkpoint_json`、日志正文或遥测正文。
+2. **不得**进入模型上下文、**不得**作为任何 Proposal 字段、**不得**进入主观记忆 ——
+   否则等于给模型一个"这句话我说过没有"的校验器。
+3. **不得**返回或记录指纹、长度、密文、密钥标识。
+
+**候选正文的传输约束**
+
+- 候选正文只在**进程间内存**中传递：不写临时文件、不进 IPC 日志 / trace / dump、不进异常堆栈。
+- Archive Writer 算完 HMAC 后**立即丢弃**该正文，不做缓存、不参与其他用途、不留"最近一次候选"。
+- 金丝雀判据同样适用：在库表、派生索引、检查点、日志与转储中搜索，命中数必须为 0。
+
+**滥用防护（最小集）**
+
+| 项 | 要求 |
+|---|---|
+| 有界调用 | 同一 `eventId` 的 `compare` 尝试按时间窗计数（默认 8 次 / 10 分钟，可配），超限对适配器返回 **429** |
+| 异常审计 | 超限与异常模式只记**计数与身份字段**（`eventId` / `adapterId` / `source`），**不含正文与判定值** |
+| 不解密 | 只用 `mac_key` 算 HMAC；`enc_key` 与 `content_enc` 全程不参与 |
+| 不新增密钥 | 复用已存 `content_fingerprint` 与 `mac_key_id`，不引入新的密钥体系或新的加密用途 |
+
+**真实风险与理论风险（明确区分，不为后者加机制）**
+
+- **真实**：① 调用者越权（模型 / Studio 拿到 `compare`）→ 用 scope 与"不编进 SDK"阻断；
+  ② 候选正文经日志泄露 → 用传输约束阻断；③ 无界调用打爆 Archive → 用计数阻断。
+- **理论**：④ 适配器对**自己**投递过的历史正文做等值确认。可行性要求持有该适配器令牌与那条
+  `adapterEventRef`；而 HMAC 是**全文等值**比对，不提供前缀或部分匹配，**无法据此重建内容**，
+  只能确认"整段是否一致"。**不额外加机制** —— 上述计数与"结果不进认知"已覆盖其危害面。
+- **部署边界**：同机管理员可读进程内存、可抓 IPC 的情形不在软件保证范围内（见 §5.3 末尾）。
+
 ## 6. 原始正文的唯一进入路径
 
 ### 6.1 什么是"原文旁路"
@@ -234,6 +303,7 @@ Archive 是**记录域**，不是记忆域。二者在密钥、写入者、保�
 | 形态 | 是否允许 | 条件 |
 |---|---|---|
 | 感知缓冲里的明文 | 允许 | TTL 到期即删；不落盘、不进转储 |
+| IPC 在途明文（`append` / `compare` 的候选正文） | 允许（**仅进程间内存**） | 不落日志 / trace / dump / 临时文件；算完即弃，不留副本（§5.5） |
 | **Archive 里的 AEAD 密文** | **允许** | 独立密钥域；Brain 无密钥无连接；按 `expires_at` 有限期删除 |
 | 主观记忆密文片段 | 允许 | 按遗忘流程可销毁 |
 | 密文哈希 `ciphertext_sha256` | 允许 | 只校验存储完整性，不可反推原文 |
@@ -249,7 +319,7 @@ Archive 是**记录域**，不是记忆域。二者在密钥、写入者、保�
 **明文判据**：向系统注入带唯一标记串的刺激，遍历所有库表、索引、检查点与缓存，
 该标记串**不得**出现在：`events` 任意列、`tasks.payload_json`、`runtime_state.checkpoint_json`、
 `archive_decisions` 任意列、`archive_conflict_records` 任意列、日志、
-`archive_records` 的任何**非密文**列。
+**IPC 请求/响应日志、trace 与故障转储**、`archive_records` 的任何**非密文**列。
 
 **密文判据**：同一标记串在 `archive_records.content_enc` 中**不得**以明文形式出现
 （即该 BLOB 中搜不到标记串原文）；且用 Brain 身份无法解密该 BLOB。
@@ -305,7 +375,8 @@ Archive 是**记录域**，不是记忆域。二者在密钥、写入者、保�
 5. 新的外部动作是否都带幂等键，并有"重复执行 = 0"的测试？
 6. 梦境代码有没有可能拿到真实 token、网络句柄或文件写权限？
 7. 遗忘流程是否覆盖：正文、派生索引、向量、FTS、关系、缓存、思维快照、梦境输入、历史修订、可读快照？
-8. 有没有为了跑通而放宽了上面任何一条？
+8. 有没有让 `archive.compare` 的判定结果进入模型上下文、主观记忆、`events` 任何列或日志正文？
+9. 有没有为了跑通而放宽了上面任何一条？
 
 ## 11. 真实遗忘的存储约束
 

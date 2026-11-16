@@ -148,7 +148,7 @@ Soul Harness 是一个**独立运行的认知运行时**，不依赖 DSH、Minec
 
 | 能力 | 启用前必须满足 |
 |---|---|
-| **Sealed Archive** | 独立数据库文件 + 独立进程 + 独立文件权限（Brain 账号无读权）+ 无查询 SDK 编译进 Brain + **加密存储 + 独立密钥体系** + 按 `eventId` 幂等 + **仅暴露受限状态 IPC** + **有限期保留分类** + 句柄审计通过。**未满足前不创建该表，原始正文不落盘**（见 §6.3 与 `RUNTIME-LIFECYCLE.md` §7.2） |
+| **Sealed Archive** | 独立数据库文件 + 独立进程 + 独立文件权限（Brain 账号无读权）+ 无查询 SDK 编译进 Brain + **加密存储 + 独立密钥体系** + 按 `eventId` 幂等 + **仅暴露受限 IPC（`append` / `status` / `compare`）** + **有限期保留分类** + 句柄审计通过。**未满足前不创建该表，原始正文不落盘**（见 §6.3 与 `RUNTIME-LIFECYCLE.md` §7.2） |
 | **Action Gateway** | 独立进程 + 独立能力令牌 + 幂等键持久化 + 回执校验 + "重复执行次数 = 0"测试通过 |
 | **Dream Sandbox** | **独立进程**（非仅 Worker Thread）+ 无网络 + 无文件写 + 无真实工具令牌 + 逃逸测试通过。**Worker Thread 不构成安全边界**（同进程共享内存与权限），只可用于非安全目的的数值计算 |
 
@@ -194,7 +194,7 @@ Soul Harness 是一个**独立运行的认知运行时**，不依赖 DSH、Minec
 
 - `required` 事件：**Archive 持久化并提交 `archive_ref` 之前，不允许返回 `accepted`**；
   Archive 失败**不得**降级为 `excluded`，**不得**进入正式 `understood` / `response_committed`；
-  重试耗尽向适配器返回 **503**，同一 `eventId` 重试必须幂等。
+  重试耗尽向适配器返回 **503**，同一 `adapterEventRef` 重投必须幂等（适配器不持有、也不需要保存 `eventId`）。
 - `excluded` 与 P1 事件：允许正常 ACK 与认知处理，但**不提供审计能力**，原文仍只在感知缓冲中存在。
 
 **决议六：保留分类（SH-002.2 新增）。**
@@ -234,12 +234,24 @@ Soul Harness 是一个**独立运行的认知运行时**，不依赖 DSH、Minec
 - 归属 **Reliable World / 审计侧**；**Brain 运行时上下文不得读取**。
 - 有独立保留期限（`expiresAt`），与事件记录、Archive 记录各自独立。
 
-**决议十：加密与接口细化（SH-002.3 新增）。**
+**决议十：加密与接口细化（SH-002.3 新增；SH-003.2 修订为三接口）。**
 
 - **AEAD 加密密钥与 HMAC 指纹密钥分离**，可独立轮换，不得由同一密钥派生而无法分开轮换。
 - 保留期限写入时**固化为 `expiresAt`**（绝对时间），删除以其为准；不允许 NULL / 0 / 永久。
-- Archive Writer 对外只有两个接口：**`append`（写）** 与 **`status`（只回 `eventId`/`archiveState`/`archiveRef`）**；
-  状态查询**不返回任何内容**，二者不得合并。
+- Archive Writer 对外**只有三个接口**，职责互斥：
+
+  | 接口 | 用途 | 返回 |
+  |---|---|---|
+  | `append` | 写入 / 幂等 | `archived` / `duplicate` / `conflict` / `error` |
+  | `status` | 恢复与对账 | **只有** `eventId` / `archiveState` / `archiveRef` |
+  | `compare` | 去重命中时的**等值核对** | **只有** `match` / `conflict` / `not_found` |
+
+  请求与响应的逐字段定义见 `TRUST-BOUNDARIES.md` §5.4：**请求可以包含必要的正文输入**
+  （`append` 的待归档原文、`compare` 的候选正文），**响应一律不含**原文、密文、指纹、长度或密钥信息。
+
+- 三个接口**都不得**返回原文、密文、解密内容、指纹、长度或密钥信息，也**不得合并**为一个"通用查询"。
+- **`compare` 只由 Ingress 的去重路径调用**，只回判定、**不解密** Archive（仅用 `mac_key` 做 HMAC）；
+  调用者、绑定字段与滥用防护见 `TRUST-BOUNDARIES.md` §5.5。
 
 **决议十一：eventId 重试、`failed` 语义与终态原因码（SH-002.4 新增）。**
 
@@ -338,12 +350,12 @@ Soul Harness 是一个**独立运行的认知运行时**，不依赖 DSH、Minec
 
 ### P0 架构冻结与工程规范
 
-交付：ADR-001、TRUST-BOUNDARIES、DATA-MODEL、RUNTIME-LIFECYCLE、MODULES、AI-DEVELOPMENT-RULES、
-威胁模型、验收矩阵、唯一主计划（本文）。
+交付：ADR-001、TRUST-BOUNDARIES、DATA-MODEL、RUNTIME-LIFECYCLE、MODULES、IDENTITY-PROTOCOL、
+AI-DEVELOPMENT-RULES、威胁模型、验收矩阵、唯一主计划（本文）。
 
 通过标准：核心架构无未解决重大冲突；两个 AI 能据同一套文档理解模块边界；首期接口与身份协议明确。
 
-**当前进度：进行中。**
+**当前进度：文档主体已完成（SH-001 → SH-003.2），待独立审查。代码为零，见 §13。**
 
 ### P1 最小运行时骨架
 
@@ -445,6 +457,9 @@ Studio 最小页面、CLI 健康检查、单实例锁。
 | 联想质量 | 优于旧词法两跳基线，保留多样性且不过度跑题 | 盲测回放与人工评分 |
 | 主观记忆质量 | 合理保留、误记、遗忘；不以零错误或高错误率为目标 | 纵向情境测试 |
 
+> **测量口径（SH-003.2）**：去重命中且 Archive 已启用时，ACK 之前会多一次 `compare` 受限 IPC。
+> Ingress 受理指标必须**分 P1 / P8 两种形态**测量，不得用 P1 的数字代表 P8。
+
 建议记录：活跃节点/边、激活分布、反复思维次数、前注意丢弃率、睡眠已完成周期、梦境片段保留率、
 主观来源清晰度、人格演化速率、模型质量/费用分布。**不得**将对话原文默认写进遥测。
 
@@ -509,9 +524,11 @@ Archive 被读取 · 假遗忘 · 梦境外溢 · 幻觉动作 · 会话串记�
 | 任务 | 内容 | 状态 |
 |---|---|---|
 | SH-001 | 冻结旧仓库基线、建仓、架构文档初始化 | **已完成（文档层面）** |
-| SH-002 | 统一主计划、五项冲突决议、审查问题修正 | **本次交付** |
-| SH-003 | 定义 persona / session / thread / run / event / action 身份协议（类型 + Schema） | 未开始 |
-| SH-004 | Contracts 与 JSON Schema 落地 | 未开始 |
+| SH-002 | 统一主计划、五项冲突决议、审查问题修正 | **已完成（文档层面，含 SH-002.1–SH-002.7）** |
+| SH-003 | 定义 persona / session / thread / run / event / action 身份协议（类型 + Schema） | **已完成（文档层面）** |
+| SH-003.1 | persona 作用域、去重命中的正文核对边界、审计表作用域 | **已完成（文档层面）** |
+| SH-003.2 | 身份协议收口：Archive 三接口与 `compare` 边界、适配器去重口径、台账与作用域规则 | **本次交付（文档层面）** |
+| SH-004 | Contracts 与 JSON Schema 落地 | 未开始（SH-003.2 已产出开工准备报告，待审阅） |
 | SH-005 | 初始化 Monorepo、构建系统与 CI | 未开始 |
 | SH-006 | 实现 Persistence 与 Migration | 未开始 |
 | SH-007 | 实现独立 Daemon 生命周期 | 未开始 |
@@ -522,6 +539,8 @@ Archive 被读取 · 假遗忘 · 梦境外溢 · 幻觉动作 · 会话串记�
 | SH-012 | 完成第一阶段集成验收 | 未开始 |
 
 > "已完成（文档层面）"仅表示文档已交付，**不含任何可执行代码**。
+> SH-003.2 不新增任何连续收口任务（无 SH-003.3 及以后）；剩余问题一律记入各文档的 OPEN 项
+> （带最迟决策阶段）或本表的任务依赖，不得以"以后再说"消失。
 
 ## 14. 附录：与历史来源的对应
 
