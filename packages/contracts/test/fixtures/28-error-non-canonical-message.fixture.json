@@ -1,0 +1,11 @@
+{
+  "schema": "soul.error.v1",
+  "expect": "invalid",
+  "why": "The message is fixed per code; free text could echo an exception or the stimulus.",
+  "doc": {
+    "error": {
+      "code": "schema_invalid",
+      "message": "requestNonce field is too short: abcdef"
+    }
+  }
+}

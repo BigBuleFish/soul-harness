@@ -314,12 +314,22 @@ IPC 请求必须同时携带：`eventId`、`personaId`、`adapterId`、`source`�
 > Archive 的存在意义就是保存加密原始记录；它允许存在的前提是
 > ①加密 ②独立密钥 ③Brain 无读取能力 ④有限保留 ⑤不可反向喂给主观记忆。
 
+**输入信任边界（SH-004 修正）**
+
+- 外部只能提交 `soul.stimulus.input.v1`。该信封**不声明** `receivedAt` 且顶层封闭，
+  因此适配器提交 `receivedAt` 会被判为 `schema_invalid`，**而不是**被信任、被覆盖或被忽略。
+- `receivedAt` 只能由 Ingress 在**受信任接收路径**内生成，是系统唯一权威的接收时间；
+  归一化后信封为 `soul.stimulus.v1`，Runtime 只消费这一层。
+- `occurredAt` 允许来源自报，属**来源声明**：可缺失、可偏斜、可错误，
+  **不得**当作"系统何时知道这件事"的依据。
+
 ### 6.2 可测试判据
 
 **明文判据**：向系统注入带唯一标记串的刺激，遍历所有库表、索引、检查点与缓存，
 该标记串**不得**出现在：`events` 任意列、`tasks.payload_json`、`runtime_state.checkpoint_json`、
 `archive_decisions` 任意列、`archive_conflict_records` 任意列、日志、
-**IPC 请求/响应日志、trace 与故障转储**、`archive_records` 的任何**非密文**列。
+**IPC 请求/响应日志、trace 与故障转储**、**错误响应体（`ErrorResponse.error.message`）**、
+`archive_records` 的任何**非密文**列。
 
 **密文判据**：同一标记串在 `archive_records.content_enc` 中**不得**以明文形式出现
 （即该 BLOB 中搜不到标记串原文）；且用 Brain 身份无法解密该 BLOB。
@@ -363,6 +373,9 @@ IPC 请求必须同时携带：`eventId`、`personaId`、`adapterId`、`source`�
 - 用 Archive 作为"隐藏正确答案"去纠正或重建主观记忆。
 - 用主观确信度授权任何现实动作。
 - 向用户虚构操作结果、聊天证据、财务记录或现实人物的事实。
+- **用异常字符串、堆栈、文件路径或输入片段拼装错误响应**：`ErrorResponse.error.message`
+  只能取 `packages/contracts` 中 `ERROR_MESSAGES` 的固定文案，Schema 强制 `code` ↔ `message` 配对，
+  自由文本会被判为 `schema_invalid`。
 - 为通过测试而删除安全约束，或用 Mock 结果冒充真实功能。
 - 在梦境中执行真实动作或外发消息。
 

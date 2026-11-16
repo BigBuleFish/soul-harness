@@ -1,15 +1,14 @@
 {
-  "schema": "soul.stimulus.v1",
+  "schema": "soul.stimulus.input.v1",
   "expect": "valid",
-  "why": "Extended envelope: occurredAt present and payload carrying arbitrary adapter-defined keys.",
+  "why": "Extended input: source-claimed occurredAt plus adapter-defined payload keys.",
   "doc": {
-    "schema": "soul.stimulus.v1",
+    "schema": "soul.stimulus.input.v1",
     "personaId": "psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC",
     "adapterId": "qq",
     "source": "qq.group",
     "adapterEventRef": "qq:9c21",
     "requestNonce": "SAME-nonce-reused",
-    "receivedAt": 1731700000000,
     "occurredAt": 1731699999000,
     "payload": {
       "kind": "qq.message",

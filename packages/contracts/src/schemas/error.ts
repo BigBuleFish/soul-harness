@@ -1,17 +1,34 @@
 /**
  * Error response — JSON Schema.
  *
- * `code` is enumerated from `ERROR_CODES` only. A `StatusReason` value such as
- * `buffer_lost` is therefore rejected here: terminal reasons are reported by the
- * status query, not by the call that failed.
+ * Two constraints are load-bearing here:
+ *   1. `code` comes from `ERROR_CODES` only, so a `StatusReason` such as
+ *      `buffer_lost` is rejected: terminal reasons belong to the status query.
+ *   2. `message` is pinned to the canonical text for that code via a `oneOf`
+ *      over the catalog, so an implementation cannot interpolate an exception,
+ *      a stack frame, a path or a fragment of the stimulus into the response.
+ *
+ * The per-code branches are closed objects, so unknown fields fail as well.
  */
 
-import { ERROR_CODES } from '../errors/codes.js';
+import { ERROR_CODES, ERROR_MESSAGES } from '../errors/codes.js';
 import { EVENT_ID_PATTERN } from '../ids/patterns.js';
 import type { JsonSchema } from './types.js';
 
-/** Upper bound for the fixed description; keeps accidental content out. */
+/** Kept for documentation; the catalog itself is the actual upper bound. */
 export const ERROR_MESSAGE_MAX_LENGTH = 200;
+
+const branch = (code: (typeof ERROR_CODES)[number]) =>
+  ({
+    type: 'object',
+    additionalProperties: false,
+    required: ['code', 'message'],
+    properties: {
+      code: { const: code },
+      message: { const: ERROR_MESSAGES[code] },
+      eventId: { type: 'string', pattern: EVENT_ID_PATTERN },
+    },
+  }) as const;
 
 export const errorResponseSchema = {
   $schema: 'http://json-schema.org/draft-07/schema#',
@@ -22,14 +39,7 @@ export const errorResponseSchema = {
   required: ['error'],
   properties: {
     error: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['code', 'message'],
-      properties: {
-        code: { enum: [...ERROR_CODES] },
-        message: { type: 'string', minLength: 1, maxLength: ERROR_MESSAGE_MAX_LENGTH },
-        eventId: { type: 'string', pattern: EVENT_ID_PATTERN },
-      },
+      oneOf: ERROR_CODES.map(branch),
     },
   },
 } as const satisfies JsonSchema;

@@ -1,15 +1,14 @@
 {
-  "schema": "soul.stimulus.v1",
+  "schema": "soul.stimulus.input.v1",
   "expect": "invalid",
   "why": "payload must be a JSON object, not a bare string.",
   "doc": {
-    "schema": "soul.stimulus.v1",
+    "schema": "soul.stimulus.input.v1",
     "personaId": "psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC",
     "adapterId": "minecraft",
     "source": "minecraft.chat",
     "adapterEventRef": "mc-7f3a9c21",
     "requestNonce": "NQ7xK2mR9tVb4Wc8",
-    "receivedAt": 1731700000000,
     "payload": "hello"
   }
 }

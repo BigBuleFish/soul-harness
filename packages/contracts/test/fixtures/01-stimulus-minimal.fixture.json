@@ -1,15 +1,14 @@
 {
-  "schema": "soul.stimulus.v1",
+  "schema": "soul.stimulus.input.v1",
   "expect": "valid",
-  "why": "Minimal envelope: required fields only, no occurredAt.",
+  "why": "Minimal adapter input: required fields only, no occurredAt and no receivedAt.",
   "doc": {
-    "schema": "soul.stimulus.v1",
+    "schema": "soul.stimulus.input.v1",
     "personaId": "psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC",
     "adapterId": "minecraft",
     "source": "minecraft.chat",
     "adapterEventRef": "mc-7f3a9c21",
     "requestNonce": "NQ7xK2mR9tVb4Wc8",
-    "receivedAt": 1731700000000,
     "payload": { "kind": "mc.world", "version": 1 }
   }
 }

@@ -41,7 +41,7 @@ DSH / Minecraft / QQ / CLI 都是**可选适配器**；不安装它们，Daemon 
 
 | 包 | 内容 | 状态 |
 |---|---|---|
-| [packages/contracts](packages/contracts/README.md) | 协议类型、9 份 JSON Schema、枚举与标识符格式；零运行时依赖、无 IO、不生成 ID | **已实现（协议层）**，含测试与正反 fixtures |
+| [packages/contracts](packages/contracts/README.md) | 协议类型、10 份 JSON Schema、枚举与标识符格式；双层信封（适配器输入层 / Ingress 归一化层）、零运行时依赖、无 IO、不生成 ID | **已实现（协议层）**，含测试与正反 fixtures |
 
 ## 旧系统
 

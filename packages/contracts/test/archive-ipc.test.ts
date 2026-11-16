@@ -50,31 +50,52 @@ describe('append — request may carry the original, response may not', () => {
     }
   });
 
-  it('accepts archived and duplicate responses with a ref', () => {
-    expect(isValid(APPEND_RES, { result: 'archived', archiveRef: REF })).toBe(true);
-    expect(isValid(APPEND_RES, { result: 'duplicate', archiveRef: REF })).toBe(true);
-  });
-
-  it('requires a ref when archived', () => {
-    expect(isValid(APPEND_RES, { result: 'archived' })).toBe(false);
-    expect(isValid(APPEND_RES, { result: 'duplicate' })).toBe(false);
-  });
-
-  it('forbids a ref on conflict and error', () => {
-    expect(isValid(APPEND_RES, { result: 'conflict', archiveRef: REF })).toBe(false);
-    expect(isValid(APPEND_RES, { result: 'error', archiveRef: REF })).toBe(false);
-    expect(isValid(APPEND_RES, { result: 'conflict' })).toBe(true);
-  });
-
-  it('accepts an error result with a controlled error code', () => {
-    expect(isValid(APPEND_RES, { result: 'error', errorCode: 'archive_unavailable' })).toBe(true);
-    expect(isValid(APPEND_RES, { result: 'error', errorCode: 'buffer_lost' })).toBe(false);
-  });
-
   it('never returns content on the response', () => {
     for (const extra of [{ body: 'x' }, { content: 'x' }, { fingerprint: 'x' }, { length: 1 }]) {
-      expect(isValid(APPEND_RES, { result: 'archived', archiveRef: REF, ...extra })).toBe(false);
+      expect(isValid(APPEND_RES, { result: 'conflict', ...extra })).toBe(false);
     }
+  });
+});
+
+describe('append response — the four legal shapes', () => {
+  it.each([
+    ['archived', { result: 'archived', archiveRef: REF }],
+    ['duplicate', { result: 'duplicate', archiveRef: REF }],
+    ['conflict', { result: 'conflict' }],
+    ['error', { result: 'error', errorCode: 'archive_unavailable' }],
+  ])('accepts %s', (_label, doc) => {
+    expect(isValid(APPEND_RES, doc)).toBe(true);
+  });
+});
+
+describe('append response — every illegal combination is rejected', () => {
+  const cases: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+    ['archived without archiveRef', { result: 'archived' }],
+    ['archived with errorCode', { result: 'archived', archiveRef: REF, errorCode: 'internal_error' }],
+    ['archived with both and extra', { result: 'archived', archiveRef: REF, errorCode: 'internal_error', body: 'x' }],
+    ['duplicate without archiveRef', { result: 'duplicate' }],
+    ['duplicate with errorCode', { result: 'duplicate', archiveRef: REF, errorCode: 'internal_error' }],
+    ['conflict with archiveRef', { result: 'conflict', archiveRef: REF }],
+    ['conflict with errorCode', { result: 'conflict', errorCode: 'archive_conflict' }],
+    ['conflict with both', { result: 'conflict', archiveRef: REF, errorCode: 'archive_conflict' }],
+    ['error without errorCode', { result: 'error' }],
+    ['error with archiveRef', { result: 'error', errorCode: 'archive_unavailable', archiveRef: REF }],
+    ['error with a status reason instead of an error code', { result: 'error', errorCode: 'buffer_lost' }],
+    ['unknown result value', { result: 'ok' }],
+    ['missing result', { archiveRef: REF }],
+  ];
+
+  it.each(cases)('rejects %s', (_label, doc) => {
+    expect(isValid(APPEND_RES, doc)).toBe(false);
+  });
+
+  it('reports a oneOf failure for a mismatched pair', () => {
+    expect(errorsFor(APPEND_RES, { result: 'conflict', archiveRef: REF })).toContain('oneOf');
+  });
+
+  it('declares exactly four branches', () => {
+    const branches = SCHEMAS[APPEND_RES]['oneOf'] as readonly unknown[];
+    expect(branches).toHaveLength(4);
   });
 });
 
@@ -94,21 +115,21 @@ describe('status — three fields in, three fields out', () => {
   });
 
   it('pairs archiveRef with archiveState', () => {
-    expect(isValid(STATUS_RES, { eventId: EVENT_ID, archiveState: 'archived', archiveRef: null })).toBe(
-      false,
-    );
-    expect(isValid(STATUS_RES, { eventId: EVENT_ID, archiveState: 'failed', archiveRef: REF })).toBe(
-      false,
-    );
-    expect(isValid(STATUS_RES, { eventId: EVENT_ID, archiveState: 'not_found', archiveRef: REF })).toBe(
-      false,
-    );
+    expect(
+      isValid(STATUS_RES, { eventId: EVENT_ID, archiveState: 'archived', archiveRef: null }),
+    ).toBe(false);
+    expect(
+      isValid(STATUS_RES, { eventId: EVENT_ID, archiveState: 'failed', archiveRef: REF }),
+    ).toBe(false);
+    expect(
+      isValid(STATUS_RES, { eventId: EVENT_ID, archiveState: 'not_found', archiveRef: REF }),
+    ).toBe(false);
   });
 
   it('accepts a null ref for non-archived states', () => {
-    expect(isValid(STATUS_RES, { eventId: EVENT_ID, archiveState: 'failed', archiveRef: null })).toBe(
-      true,
-    );
+    expect(
+      isValid(STATUS_RES, { eventId: EVENT_ID, archiveState: 'failed', archiveRef: null }),
+    ).toBe(true);
     expect(
       isValid(STATUS_RES, { eventId: EVENT_ID, archiveState: 'not_found', archiveRef: null }),
     ).toBe(true);
@@ -175,7 +196,9 @@ describe('compare — bounded request, three-valued response', () => {
       { archiveRef: REF },
     ]) {
       expect(isValid(COMPARE_RES, { result: 'match', ...extra })).toBe(false);
-      expect(errorsFor(COMPARE_RES, { result: 'match', ...extra })).toContain('additionalProperties');
+      expect(errorsFor(COMPARE_RES, { result: 'match', ...extra })).toContain(
+        'additionalProperties',
+      );
     }
   });
 
@@ -195,16 +218,14 @@ describe('the three archive interfaces stay separate', () => {
   });
 
   it('gives each response its own result vocabulary', () => {
-    const appendProps = SCHEMAS[APPEND_RES]['properties'] as Record<string, Record<string, unknown>>;
-    const statusProps = SCHEMAS[STATUS_RES]['properties'] as Record<string, Record<string, unknown>>;
+    const branches = SCHEMAS[APPEND_RES]['oneOf'] as ReadonlyArray<Record<string, unknown>>;
+    const appendResults = branches.map(
+      (entry) => (entry['properties'] as Record<string, Record<string, unknown>>)['result']?.['const'],
+    );
     const compareProps = SCHEMAS[COMPARE_RES]['properties'] as Record<string, Record<string, unknown>>;
+    const statusProps = SCHEMAS[STATUS_RES]['properties'] as Record<string, Record<string, unknown>>;
 
-    expect(appendProps['result']?.['enum']).toStrictEqual([
-      'archived',
-      'duplicate',
-      'conflict',
-      'error',
-    ]);
+    expect(appendResults).toStrictEqual(['archived', 'duplicate', 'conflict', 'error']);
     expect(compareProps['result']?.['enum']).toStrictEqual(['match', 'conflict', 'not_found']);
     expect(statusProps['archiveState']?.['enum']).toStrictEqual(['archived', 'failed', 'not_found']);
   });

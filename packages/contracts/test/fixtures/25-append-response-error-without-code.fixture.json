@@ -1,0 +1,8 @@
+{
+  "schema": "soul.archive.append.response.v1",
+  "expect": "invalid",
+  "why": "An error result must name a controlled error code.",
+  "doc": {
+    "result": "error"
+  }
+}

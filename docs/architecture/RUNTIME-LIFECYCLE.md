@@ -151,17 +151,22 @@ received → accepted → noticed → understood → response_committed → acte
 
 **信封必填字段**（Schema 由 `packages/contracts` 声明，Ingress 执行校验）
 
+> **两层信封（SH-004 修正）**：外部只能提交 `soul.stimulus.input.v1`；Ingress 归一化后产出
+> `soul.stimulus.v1` 交给 Runtime。两层的差别只有两点：`receivedAt`（由 Ingress 生成）与
+> `schema` 常量（由 Ingress 重写）。
+
 | 字段 | 类型 / 格式 | 约束 |
 |---|---|---|
-| `schema` | 常量 `soul.stimulus.v1` | 版本协商 |
+| `schema` | 常量 `soul.stimulus.input.v1`（适配器层）/ `soul.stimulus.v1`（归一化后） | 版本协商；两层各自封闭，混用即 `schema_invalid` |
 | **`adapterEventRef`** | 字符串（1–64，受控字符集） | **必填**；适配器**自己的**刺激标识；同一刺激重试**必须复用**。Runtime 据此去重（`(personaId, adapterId, source, adapterEventRef)` 唯一） |
 | `eventId` | **不由 Adapter 提供** | 由 Ingress 生成（`evt_`），通过 **ACK 响应返回**给适配器。见 `IDENTITY-PROTOCOL.md` §4.5 |
 | **`requestNonce`** | 字符串，`^[A-Za-z0-9_-]{16,64}$` | **必填**；每次**逻辑投递**一个；同一次投递的内部重试**必须复用**；不得由正文/哈希/计数派生；必须与已认证 `adapterId` 绑定 |
 | `adapterId` | 受控标识符 `^[a-z0-9._-]{1,64}$` | 必须已在注册表登记；**内部来源也用正式 ID（如 `system.sleep`），不得为 NULL** |
 | `source` | 受控标识符，同上 | 必须在注册表登记；须与 `adapterId` 的授权范围一致 |
 | `personaId` | 字符串 | 显式指定，禁止"猜最近会话" |
-| `receivedAt` / `occurredAt` | Unix ms | `occurredAt` 可缺省 |
-| `payload` | 对象 | 正文，仅在感知缓冲中存在 |
+| **`receivedAt`** | Unix ms，**Ingress 生成** | **Adapter 不得提交**：输入层信封不声明该字段，提交即 `schema_invalid`。它是系统权威的接收时间 |
+| `occurredAt` | Unix ms，**来源自报** | 可缺省；是"来源声称发生的时间"，**不是**系统权威时间，可偏斜、可错误 |
+| `payload` | 对象 | 正文 + 适配器自定义字段，仅在感知缓冲中存在 |
 
 > `requestNonce` 是**投递身份**的一部分，不是内容的一部分：它与 `adapterId`、`eventId`、`source`
 > 一起构成冲突审计的幂等键（`DATA-MODEL.md` §5.3）。**不得**为了检测 nonce 重用而保存内容或内容哈希。
@@ -170,8 +175,11 @@ received → accepted → noticed → understood → response_committed → acte
 Adapter 提交（信封 + 正文）
    │
    ▼
-[1] Ingress 鉴权与校验：鉴权、来源、限流、协议版本、信封 Schema
+[1] Ingress 鉴权与校验：鉴权、来源、限流、协议版本、信封 Schema（`soul.stimulus.input.v1`）
    │  ✗ 失败 → status=rejected（正文立即丢弃，不落任何存储，不归档，不 ACK）
+   ▼
+[1N] 归一化：生成 `receivedAt`（Ingress 权威），重写 `schema` = `soul.stimulus.v1`
+   │     `occurredAt` 原样保留（来源自报，不作权威）；此后只有归一化信封在系统内流动
    ▼
 [1D] 去重判定：计算 (personaId, adapterId, source, adapterEventRef)，查唯一索引
    │   ├── 未命中 → **分配新 eventId（evt_）** → 进入 [2]
@@ -242,6 +250,8 @@ Adapter 提交（信封 + 正文）
 | 11 | P1（Archive 关闭）：`archive_state='none'`，正文随 TTL 删除，**不承诺任何原始事件审计能力** |
 | 12 | **去重先于缓冲与 disposition**：命中去重键的投递**不得**写入感知缓冲、**不得**写事件行、**不得**调用 `append` |
 | 13 | `compare` 只在 [1D] 命中 `required` 且已归档时调用，**每个投递最多一次**；未命中路径**不得**调用（边界见 `TRUST-BOUNDARIES.md` §5.5） |
+| 14 | `receivedAt` **只能由 Ingress 生成**：Adapter 提交的 `receivedAt` 在 [1] 就被 Schema 拒绝；Runtime 只接受 `soul.stimulus.v1` |
+| 15 | `occurredAt` 是来源自报时间，**不得**用于任何"系统何时知道"的判断（那只能看 `receivedAt`） |
 
 ### 7.2 Archive 存储语义与 P1 决议
 

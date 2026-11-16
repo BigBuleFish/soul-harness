@@ -7,12 +7,14 @@
  *   - Requests MAY carry body content: `append` carries the original that is
  *     about to be archived, `compare` carries the candidate body to test.
  *   - Responses NEVER carry content: no plaintext, no ciphertext, no
- *     fingerprint, no byte length, no key material. Schemas enforce this with
- *     `additionalProperties: false` and by simply not declaring such fields.
+ *     fingerprint, no byte length, no key material.
  *   - The three interfaces are NOT interchangeable: they have separate request
  *     and response types, and there is no shared "generic archive result".
  *   - `compare` answers a single question and returns exactly one of three
  *     verdicts. It never returns the compared content or any derivative.
+ *   - `append` responses are a discriminated union: each result code has exactly
+ *     one legal field set, so `{result:'archived'}` without a handle, or
+ *     `{result:'error'}` without a code, cannot be represented in TypeScript.
  */
 
 import type {
@@ -51,17 +53,43 @@ export const ARCHIVE_APPEND_RESULTS = ['archived', 'duplicate', 'conflict', 'err
 
 export type ArchiveAppendResult = (typeof ARCHIVE_APPEND_RESULTS)[number];
 
-/**
- * Response: a result code plus, when archived, the opaque handle the runtime
- * stores in `events.archive_ref`. No content, no fingerprint, no length.
- */
-export interface ArchiveAppendResponse {
-  readonly result: ArchiveAppendResult;
-  /** Present for `archived` and `duplicate`; absent otherwise. */
-  readonly archiveRef?: ArchiveRef;
-  /** Present when `result` is `error`; controlled enum only. */
-  readonly errorCode?: ErrorCode;
+/** Freshly written. A handle exists and no error code may accompany it. */
+export interface ArchiveAppendArchived {
+  readonly result: 'archived';
+  readonly archiveRef: ArchiveRef;
 }
+
+/** Already present with identical content. Same shape as `archived` by design. */
+export interface ArchiveAppendDuplicate {
+  readonly result: 'duplicate';
+  readonly archiveRef: ArchiveRef;
+}
+
+/** Same event id, different content. No handle, no error code. */
+export interface ArchiveAppendConflict {
+  readonly result: 'conflict';
+}
+
+/** Transport or storage failure. A controlled code is mandatory. */
+export interface ArchiveAppendError {
+  readonly result: 'error';
+  readonly errorCode: ErrorCode;
+}
+
+/**
+ * Response: exactly one of four shapes.
+ *
+ * Pairing rules (also enforced by the JSON Schema `oneOf`):
+ *   archived  → archiveRef required, errorCode forbidden
+ *   duplicate → archiveRef required, errorCode forbidden
+ *   conflict  → neither field allowed
+ *   error     → errorCode required, archiveRef forbidden
+ */
+export type ArchiveAppendResponse =
+  | ArchiveAppendArchived
+  | ArchiveAppendDuplicate
+  | ArchiveAppendConflict
+  | ArchiveAppendError;
 
 /* -------------------------------------------------------------------------- */
 /* status                                                                     */

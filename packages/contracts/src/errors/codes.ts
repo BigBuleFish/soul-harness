@@ -25,6 +25,28 @@ export const ERROR_CODES = [
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 /**
+ * Canonical message text, one per code.
+ *
+ * This catalog is the ONLY permitted source of `ErrorResponse.error.message`.
+ * The JSON Schema pins `message` to `ERROR_MESSAGES[code]`, which makes it
+ * impossible to interpolate an exception string, a stack frame, a file path or
+ * any fragment of the stimulus into a response — the leak channel that the
+ * "no raw content" rule otherwise leaves open. Adding or changing a message is
+ * a contract change, never a runtime decision.
+ */
+export const ERROR_MESSAGES: Readonly<Record<ErrorCode, string>> = {
+  auth_failed: 'authentication failed',
+  untrusted_source: 'source is not trusted for this adapter',
+  schema_invalid: 'envelope failed schema validation',
+  rate_limited: 'too many requests',
+  archive_unavailable: 'archive is temporarily unavailable',
+  archive_conflict: 'event content conflicts with the archived original',
+  processing_failed: 'processing failed',
+  compare_limited: 'archive compare attempts exceeded for this event',
+  internal_error: 'internal error',
+};
+
+/**
  * HTTP status each code maps to. Fixed at the contract level so adapters can
  * implement retry/backoff without guessing.
  */
@@ -51,4 +73,9 @@ export function isErrorCode(value: unknown): value is ErrorCode {
 
 export function isRetryableErrorCode(value: unknown): value is RetryableErrorCode {
   return typeof value === 'string' && (RETRYABLE_ERROR_CODES as readonly string[]).includes(value);
+}
+
+/** True only when `message` is the canonical text for `code`. */
+export function isCanonicalErrorMessage(code: ErrorCode, message: unknown): boolean {
+  return typeof message === 'string' && ERROR_MESSAGES[code] === message;
 }

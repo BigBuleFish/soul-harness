@@ -96,8 +96,13 @@ export {
 
 export type { JsonObject, JsonPrimitive, JsonValue } from './json.js';
 
-export { CONTRACTS_VERSION, PROTOCOL_VERSION, SUPPORTED_STIMULUS_VERSIONS } from './version.js';
-export type { ProtocolVersion } from './version.js';
+export {
+  CONTRACTS_VERSION,
+  STIMULUS_INPUT_VERSION,
+  STIMULUS_VERSION,
+  SUPPORTED_STIMULUS_INPUT_VERSIONS,
+} from './version.js';
+export type { StimulusInputVersion, StimulusVersion } from './version.js';
 
 export {
   ARCHIVE_DISPOSITIONS,
@@ -145,14 +150,16 @@ export type {
 export {
   ERROR_CODES,
   ERROR_HTTP_STATUS,
+  ERROR_MESSAGES,
   RETRYABLE_ERROR_CODES,
+  isCanonicalErrorMessage,
   isErrorCode,
   isRetryableErrorCode,
 } from './errors/codes.js';
 export type { ErrorCode, RetryableErrorCode } from './errors/codes.js';
 export type { ErrorBody, ErrorResponse } from './errors/error-response.js';
 
-export type { StimulusPayload, StimulusV1 } from './envelope/v1.js';
+export type { StimulusInputV1, StimulusPayload, StimulusV1 } from './envelope/v1.js';
 export type { AckResponse } from './ack.js';
 
 export {
@@ -160,6 +167,10 @@ export {
   ARCHIVE_COMPARE_RESULTS,
 } from './archive/ipc.js';
 export type {
+  ArchiveAppendArchived,
+  ArchiveAppendConflict,
+  ArchiveAppendDuplicate,
+  ArchiveAppendError,
   ArchiveAppendRequest,
   ArchiveAppendResponse,
   ArchiveAppendResult,
@@ -181,6 +192,7 @@ export {
   archiveStatusRequestSchema,
   archiveStatusResponseSchema,
   errorResponseSchema,
+  stimulusInputV1Schema,
   stimulusV1Schema,
 } from './schemas/index.js';
 export type { JsonSchema, SchemaId } from './schemas/index.js';

@@ -1,0 +1,10 @@
+{
+  "schema": "soul.archive.append.response.v1",
+  "expect": "invalid",
+  "why": "archived must not carry an error code; one result has exactly one field set.",
+  "doc": {
+    "result": "archived",
+    "archiveRef": "arc-7f3a9c21",
+    "errorCode": "internal_error"
+  }
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ERROR_MESSAGE_MAX_LENGTH } from '../src/schemas/error.js';
+import { ERROR_CODES, ERROR_MESSAGES, isCanonicalErrorMessage } from '../src/errors/codes.js';
 import { errorsFor, isValid } from './helpers/validator.js';
 
 const ACK = 'soul.ack.v1' as const;
@@ -43,51 +43,86 @@ describe('ACK is identity + status only (decision B3)', () => {
   });
 });
 
-describe('ErrorResponse carries an ErrorCode, never a StatusReason', () => {
-  it('accepts a minimal error', () => {
-    expect(isValid(ERROR, { error: { code: 'schema_invalid', message: 'invalid envelope' } })).toBe(
-      true,
-    );
+describe('error messages come from a fixed catalog', () => {
+  it('has one canonical message per code', () => {
+    expect(Object.keys(ERROR_MESSAGES).sort()).toStrictEqual([...ERROR_CODES].sort());
+    for (const code of ERROR_CODES) {
+      expect(ERROR_MESSAGES[code].length).toBeGreaterThan(0);
+      expect(ERROR_MESSAGES[code]).toMatch(/^[a-z0-9][a-z0-9 ,.'-]*$/);
+    }
   });
 
-  it('accepts an allocated eventId', () => {
-    const doc = { error: { code: 'archive_conflict', message: 'conflict', eventId: EVENT_ID } };
-    expect(isValid(ERROR, doc)).toBe(true);
+  it('every canonical pair validates', () => {
+    for (const code of ERROR_CODES) {
+      const doc = { error: { code, message: ERROR_MESSAGES[code] } };
+      expect(isValid(ERROR, doc), code).toBe(true);
+      expect(isCanonicalErrorMessage(code, ERROR_MESSAGES[code])).toBe(true);
+    }
+  });
+
+  it('rejects a caller-supplied message for a valid code', () => {
+    const doc = { error: { code: 'schema_invalid', message: 'field requestNonce is too short: abc' } };
+    expect(isValid(ERROR, doc)).toBe(false);
+  });
+
+  it('rejects an exception string or stack fragment', () => {
+    for (const message of [
+      'TypeError: Cannot read properties of undefined',
+      '    at Ingress.parse (ingress.ts:42:11)',
+      'ENOENT: no such file or directory, open C:\\soul\\data\\x.db',
+    ]) {
+      expect(isValid(ERROR, { error: { code: 'processing_failed', message } })).toBe(false);
+    }
+  });
+
+  it('rejects echoed stimulus content', () => {
+    for (const message of ['hello world', '用户: 你好', 'qq.message{"text":"secret"}']) {
+      expect(isValid(ERROR, { error: { code: 'internal_error', message } })).toBe(false);
+    }
+  });
+
+  it('rejects a message paired with the wrong code', () => {
+    const doc = { error: { code: 'rate_limited', message: ERROR_MESSAGES.auth_failed } };
+    expect(isValid(ERROR, doc)).toBe(false);
+    expect(errorsFor(ERROR, doc).some((entry) => entry.startsWith('const'))).toBe(true);
+  });
+
+  it('accepts an allocated eventId but nothing else', () => {
+    expect(
+      isValid(ERROR, {
+        error: {
+          code: 'archive_conflict',
+          message: ERROR_MESSAGES.archive_conflict,
+          eventId: EVENT_ID,
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isValid(ERROR, {
+        error: {
+          code: 'archive_conflict',
+          message: ERROR_MESSAGES.archive_conflict,
+          trace: 'stack',
+        },
+      }),
+    ).toBe(false);
   });
 
   it('rejects a terminal status reason used as an error code', () => {
     for (const code of ['buffer_lost', 'ttl_expired', 'queue_overflow']) {
-      const doc = { error: { code, message: 'x' } };
-      expect(isValid(ERROR, doc)).toBe(false);
+      expect(isValid(ERROR, { error: { code, message: 'x' } })).toBe(false);
     }
-  });
-
-  it('requires a bounded, non-empty message', () => {
-    expect(isValid(ERROR, { error: { code: 'internal_error', message: '' } })).toBe(false);
-    expect(
-      isValid(ERROR, {
-        error: { code: 'internal_error', message: 'a'.repeat(ERROR_MESSAGE_MAX_LENGTH + 1) },
-      }),
-    ).toBe(false);
-    expect(
-      isValid(ERROR, {
-        error: { code: 'internal_error', message: 'a'.repeat(ERROR_MESSAGE_MAX_LENGTH) },
-      }),
-    ).toBe(true);
-  });
-
-  it('rejects extra fields in either layer', () => {
-    expect(isValid(ERROR, { error: { code: 'internal_error', message: 'x' }, trace: '...' })).toBe(
-      false,
-    );
-    expect(
-      isValid(ERROR, { error: { code: 'internal_error', message: 'x', statusReason: 'ttl_expired' } }),
-    ).toBe(false);
   });
 
   it('rejects an eventId with the wrong prefix', () => {
     expect(
-      isValid(ERROR, { error: { code: 'auth_failed', message: 'x', eventId: 'psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC' } }),
+      isValid(ERROR, {
+        error: {
+          code: 'auth_failed',
+          message: ERROR_MESSAGES.auth_failed,
+          eventId: 'psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC',
+        },
+      }),
     ).toBe(false);
   });
 });

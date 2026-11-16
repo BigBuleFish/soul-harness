@@ -5,11 +5,23 @@
  * Archive Writer cannot encrypt what it never receives. The response carries a
  * result code and, when archived, the opaque `archiveRef` — never content,
  * never a fingerprint, never a byte length.
+ *
+ * The response is a `oneOf` over four closed shapes, one per result code:
+ *   archived  → archiveRef required, errorCode absent
+ *   duplicate → archiveRef required, errorCode absent
+ *   conflict  → neither field present
+ *   error     → errorCode required, archiveRef absent
+ * Extra fields fail because every branch is closed and the branch set is exact.
  */
 
 import { RETENTION_CLASSES } from '../events/enums.js';
 import { ERROR_CODES } from '../errors/codes.js';
-import { ARCHIVE_REF_PATTERN, EVENT_ID_PATTERN, PERSONA_ID_PATTERN, SOURCE_PATTERN } from '../ids/patterns.js';
+import {
+  ARCHIVE_REF_PATTERN,
+  EVENT_ID_PATTERN,
+  PERSONA_ID_PATTERN,
+  SOURCE_PATTERN,
+} from '../ids/patterns.js';
 import type { JsonSchema } from './types.js';
 
 export const archiveAppendRequestSchema = {
@@ -31,30 +43,49 @@ export const archiveAppendRequestSchema = {
   },
 } as const satisfies JsonSchema;
 
+const archivedBranch = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['result', 'archiveRef'],
+  properties: {
+    result: { const: 'archived' },
+    archiveRef: { type: 'string', pattern: ARCHIVE_REF_PATTERN },
+  },
+} as const;
+
+const duplicateBranch = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['result', 'archiveRef'],
+  properties: {
+    result: { const: 'duplicate' },
+    archiveRef: { type: 'string', pattern: ARCHIVE_REF_PATTERN },
+  },
+} as const;
+
+const conflictBranch = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['result'],
+  properties: {
+    result: { const: 'conflict' },
+  },
+} as const;
+
+const errorBranch = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['result', 'errorCode'],
+  properties: {
+    result: { const: 'error' },
+    errorCode: { enum: [...ERROR_CODES] },
+  },
+} as const;
+
 export const archiveAppendResponseSchema = {
   $schema: 'http://json-schema.org/draft-07/schema#',
   $id: 'soul.archive.append.response.v1',
   title: 'Archive append response',
   type: 'object',
-  additionalProperties: false,
-  required: ['result'],
-  properties: {
-    result: { enum: ['archived', 'duplicate', 'conflict', 'error'] },
-    archiveRef: { type: 'string', pattern: ARCHIVE_REF_PATTERN },
-    errorCode: { enum: [...ERROR_CODES] },
-  },
-  allOf: [
-    {
-      // A handle exists exactly when the record was archived.
-      if: { properties: { result: { enum: ['archived', 'duplicate'] } }, required: ['result'] },
-      then: {
-        properties: { archiveRef: { type: 'string', pattern: ARCHIVE_REF_PATTERN } },
-        required: ['archiveRef'],
-      },
-    },
-    {
-      if: { properties: { result: { enum: ['conflict', 'error'] } }, required: ['result'] },
-      then: { properties: { archiveRef: false } },
-    },
-  ],
+  oneOf: [archivedBranch, duplicateBranch, conflictBranch, errorBranch],
 } as const satisfies JsonSchema;

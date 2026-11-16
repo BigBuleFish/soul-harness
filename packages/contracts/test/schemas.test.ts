@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { ERROR_CODES, ERROR_MESSAGES } from '../src/errors/codes.js';
 import { SCHEMAS, SCHEMA_IDS, type SchemaId } from '../src/schemas/index.js';
 import { ajv } from './helpers/validator.js';
 
@@ -13,7 +14,7 @@ const RESPONSE_SCHEMAS: readonly SchemaId[] = [
   'soul.archive.compare.response.v1',
 ];
 
-/** Field names that must never appear inside an archive response. */
+/** Field names that must never appear inside an archive/ack/error response. */
 const FORBIDDEN_RESPONSE_FIELDS = [
   'body',
   'candidateBody',
@@ -58,7 +59,26 @@ function collectPropertyNames(node: unknown, acc: Set<string> = new Set<string>(
   return acc;
 }
 
+/** Closed at the root, or a `oneOf` whose every branch is closed. */
+function isClosed(schema: Readonly<Record<string, unknown>>): boolean {
+  if (schema['additionalProperties'] === false) {
+    return true;
+  }
+  const branches = schema['oneOf'];
+  if (!Array.isArray(branches) || branches.length === 0) {
+    return false;
+  }
+  return branches.every(
+    (branch) =>
+      branch !== null && typeof branch === 'object' && (branch as Record<string, unknown>)['additionalProperties'] === false,
+  );
+}
+
 describe('JSON Schema meta-validity', () => {
+  it('registers ten messages', () => {
+    expect(SCHEMA_IDS).toHaveLength(10);
+  });
+
   it('every registered schema is a valid draft-07 document', () => {
     for (const id of SCHEMA_IDS) {
       const valid = ajv.validateSchema(SCHEMAS[id] as Record<string, unknown>);
@@ -80,9 +100,9 @@ describe('JSON Schema meta-validity', () => {
     }
   });
 
-  it('closes the top level of every message', () => {
+  it('closes every message at the top level', () => {
     for (const id of SCHEMA_IDS) {
-      expect(SCHEMAS[id]['additionalProperties'], id).toBe(false);
+      expect(isClosed(SCHEMAS[id]), id).toBe(true);
     }
   });
 
@@ -99,6 +119,56 @@ describe('JSON Schema meta-validity', () => {
     expect(new Set(SCHEMA_IDS).size).toBe(SCHEMA_IDS.length);
     for (const id of SCHEMA_IDS) {
       expect(SCHEMAS[id]).toBeDefined();
+    }
+  });
+});
+
+describe('stimulus layers are distinct', () => {
+  const inputProps = SCHEMAS['soul.stimulus.input.v1']['properties'] as Record<string, unknown>;
+  const normalizedProps = SCHEMAS['soul.stimulus.v1']['properties'] as Record<string, unknown>;
+
+  it('the input envelope never declares receivedAt', () => {
+    expect('receivedAt' in inputProps).toBe(false);
+    expect('occurredAt' in inputProps).toBe(true);
+  });
+
+  it('the normalized envelope requires receivedAt', () => {
+    expect('receivedAt' in normalizedProps).toBe(true);
+    expect(SCHEMAS['soul.stimulus.v1']['required']).toContain('receivedAt');
+    expect(SCHEMAS['soul.stimulus.input.v1']['required']).not.toContain('receivedAt');
+  });
+
+  it('pins a different version constant per layer', () => {
+    const inputSchema = inputProps['schema'] as Record<string, unknown>;
+    const normalizedSchema = normalizedProps['schema'] as Record<string, unknown>;
+    expect(inputSchema['const']).toBe('soul.stimulus.input.v1');
+    expect(normalizedSchema['const']).toBe('soul.stimulus.v1');
+  });
+});
+
+describe('error schema pins messages to the catalog', () => {
+  it('has one closed branch per error code', () => {
+    const errorProp = SCHEMAS['soul.error.v1']['properties'] as Record<string, unknown>;
+    const branches = errorProp['error'] as Record<string, unknown>;
+    const oneOf = branches['oneOf'] as ReadonlyArray<Record<string, unknown>>;
+
+    expect(oneOf).toHaveLength(ERROR_CODES.length);
+
+    const pairs = oneOf.map((branch) => {
+      const props = branch['properties'] as Record<string, Record<string, unknown>>;
+      return [props['code']?.['const'], props['message']?.['const']];
+    });
+
+    expect(pairs).toStrictEqual(ERROR_CODES.map((code) => [code, ERROR_MESSAGES[code]]));
+  });
+
+  it('every branch is closed', () => {
+    const errorProp = SCHEMAS['soul.error.v1']['properties'] as Record<string, unknown>;
+    const oneOf = (errorProp['error'] as Record<string, unknown>)['oneOf'] as ReadonlyArray<
+      Record<string, unknown>
+    >;
+    for (const branch of oneOf) {
+      expect(branch['additionalProperties']).toBe(false);
     }
   });
 });
@@ -124,8 +194,10 @@ describe('archive responses never expose content', () => {
   });
 
   it('the status request is correlation-only', () => {
-    const schema = SCHEMAS['soul.archive.status.request.v1'];
-    const properties = schema['properties'] as Record<string, unknown>;
+    const properties = SCHEMAS['soul.archive.status.request.v1']['properties'] as Record<
+      string,
+      unknown
+    >;
     expect(Object.keys(properties)).toStrictEqual(['eventId']);
   });
 });

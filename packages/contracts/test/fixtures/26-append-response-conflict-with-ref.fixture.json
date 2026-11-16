@@ -1,0 +1,9 @@
+{
+  "schema": "soul.archive.append.response.v1",
+  "expect": "invalid",
+  "why": "conflict means the original was kept, so no handle may be emitted.",
+  "doc": {
+    "result": "conflict",
+    "archiveRef": "arc-7f3a9c21"
+  }
+}
