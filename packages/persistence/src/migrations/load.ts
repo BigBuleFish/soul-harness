@@ -17,6 +17,9 @@ import type { MigrationFile } from './types.js';
 
 const MIGRATION_FILE_PATTERN = /^(\d{4})_([a-z0-9]+(?:_[a-z0-9]+)*)\.sql$/;
 
+/** snake_case description: lower-case words separated by single underscores. */
+const MIGRATION_NAME_PATTERN = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
+
 /** Normalizes CRLF/CR to LF. Checksums and execution both use this form. */
 export function normalizeSqlText(raw: string): string {
   return raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
@@ -43,6 +46,11 @@ export function createMigrationFile(
       details: { version },
     });
   }
+  if (!MIGRATION_NAME_PATTERN.test(name)) {
+    throw new PersistenceError('migration_name_invalid', 'migration name is not snake_case', {
+      details: { version, name },
+    });
+  }
   const sql = normalizeSqlText(rawSql);
   if (sql.trim().length === 0) {
     throw new PersistenceError('migration_name_invalid', 'migration file is empty', {
@@ -50,6 +58,35 @@ export function createMigrationFile(
     });
   }
   return { version, name, file, sql, checksum: checksumOfSql(sql) };
+}
+
+/**
+ * The single validation and ordering gate for every migration source.
+ *
+ * Both the directory loader and a caller-supplied `migrations` array go through
+ * this function, so they cannot diverge: version range, name shape, non-empty
+ * SQL, uniqueness and ascending order are the same in both cases. The checksum
+ * is always derived from the SQL text — a caller cannot inject one that
+ * disagrees with what will be executed.
+ *
+ * @throws PersistenceError `migration_name_invalid` for a malformed entry
+ * @throws PersistenceError `migration_duplicate_version` for a repeated version
+ */
+export function normalizeMigrations(input: readonly MigrationFile[]): readonly MigrationFile[] {
+  const byVersion = new Map<number, MigrationFile>();
+
+  for (const candidate of input) {
+    const migration = createMigrationFile(candidate.version, candidate.name, candidate.file, candidate.sql);
+    const previous = byVersion.get(migration.version);
+    if (previous !== undefined) {
+      throw new PersistenceError('migration_duplicate_version', 'two migrations share a version', {
+        details: { version: migration.version, first: previous.file, second: migration.file },
+      });
+    }
+    byVersion.set(migration.version, migration);
+  }
+
+  return [...byVersion.values()].sort((left, right) => left.version - right.version);
 }
 
 /**
@@ -70,7 +107,6 @@ export function loadMigrationsFromDir(dir: string): readonly MigrationFile[] {
   }
 
   const migrations: MigrationFile[] = [];
-  const seen = new Map<number, string>();
 
   for (const entry of entries.sort()) {
     if (!entry.endsWith('.sql')) {
@@ -87,25 +123,11 @@ export function loadMigrationsFromDir(dir: string): readonly MigrationFile[] {
       );
     }
 
-    const version = Number(match[1]);
-    const name = match[2] as string;
-    const previous = seen.get(version);
-    if (previous !== undefined) {
-      throw new PersistenceError(
-        'migration_duplicate_version',
-        'two migration files share a version',
-        {
-          details: { version, first: previous, second: entry },
-        },
-      );
-    }
-    seen.set(version, entry);
-
     const path = join(dir, entry);
     const raw = readFileSync(path, 'utf8');
-    migrations.push(createMigrationFile(version, name, path, raw));
+    migrations.push(createMigrationFile(Number(match[1]), match[2] as string, path, raw));
   }
 
-  migrations.sort((left, right) => left.version - right.version);
-  return migrations;
+  // Duplicate detection and ordering live in one place only.
+  return normalizeMigrations(migrations);
 }

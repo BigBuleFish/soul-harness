@@ -23,7 +23,13 @@ export { PERSISTENCE_ERROR_CODES, PersistenceError, isPersistenceError } from '.
 export type { PersistenceErrorCode } from './errors.js';
 
 export { defaultMigrationsDir, migrate, verifySchema } from './migrations/migrator.js';
-export { checksumOfSql, loadMigrationsFromDir, normalizeSqlText } from './migrations/load.js';
+export {
+  checksumOfSql,
+  createMigrationFile,
+  loadMigrationsFromDir,
+  normalizeMigrations,
+  normalizeSqlText,
+} from './migrations/load.js';
 export { P1_INDEXES, P1_TABLE_COLUMNS } from './migrations/expected-schema.js';
 export type { P1TableName } from './migrations/expected-schema.js';
 export type {

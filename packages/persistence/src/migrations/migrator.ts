@@ -21,7 +21,7 @@ import { databaseOf, type Store } from '../db/store.js';
 import { allRows, oneRow } from '../db/rows.js';
 import { PersistenceError } from '../errors.js';
 import { P1_INDEXES, P1_TABLE_COLUMNS } from './expected-schema.js';
-import { formatMigrationVersion, loadMigrationsFromDir } from './load.js';
+import { formatMigrationVersion, loadMigrationsFromDir, normalizeMigrations } from './load.js';
 import type { AppliedMigration, MigrateOptions, MigrateResult, MigrationFile } from './types.js';
 
 /**
@@ -109,8 +109,11 @@ function applyOne(db: DatabaseSync, migration: MigrationFile): void {
 /** Verifies applied migrations against the source tree, then applies the pending ones. */
 export function migrate(store: Store, options: MigrateOptions = {}): MigrateResult {
   const db = databaseOf(store);
-  const migrations =
-    options.migrations ?? loadMigrationsFromDir(options.dir ?? defaultMigrationsDir());
+  // Both sources pass the same gate: version range, name shape, uniqueness and
+  // ascending order are guaranteed before anything executes.
+  const migrations = normalizeMigrations(
+    options.migrations ?? loadMigrationsFromDir(options.dir ?? defaultMigrationsDir()),
+  );
 
   ensureTrackingTable(db);
   const applied = tableExists(db, 'schema_migrations') ? readApplied(db) : [];
