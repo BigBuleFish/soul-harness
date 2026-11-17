@@ -135,7 +135,10 @@ describe('migrations supplied as an array (not a directory)', () => {
     const dir = tempDir();
     const store = storeIn(dir);
 
-    const bad = { ...createMigrationFile(1, 'ok', 'inline:1', 'CREATE TABLE a (id TEXT);'), name: 'NotSnake' };
+    const bad = {
+      ...createMigrationFile(1, 'ok', 'inline:1', 'CREATE TABLE a (id TEXT);'),
+      name: 'NotSnake',
+    };
     expect(codeOf(() => migrate(store, { migrations: [bad] }))).toBe('migration_name_invalid');
   });
 });

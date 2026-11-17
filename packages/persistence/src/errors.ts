@@ -7,9 +7,11 @@
  */
 
 export const PERSISTENCE_ERROR_CODES = [
+  // store lifecycle
   'store_closed',
   'store_open_failed',
   'pragma_not_applied',
+  // migrations
   'migration_name_invalid',
   'migration_duplicate_version',
   'migration_not_found',
@@ -17,6 +19,22 @@ export const PERSISTENCE_ERROR_CODES = [
   'migration_checksum_mismatch',
   'migration_failed',
   'schema_mismatch',
+  // transactions
+  'nested_write',
+  'read_only_violation',
+  'async_callback_unsupported',
+  'transaction_closed',
+  // database errors
+  'unique_conflict',
+  'foreign_key_violation',
+  'check_violation',
+  'not_null_violation',
+  'db_error',
+  // mapping
+  'invalid_field_name',
+  'invalid_column_value',
+  'invalid_json_column',
+  'invalid_argument',
 ] as const;
 
 export type PersistenceErrorCode = (typeof PERSISTENCE_ERROR_CODES)[number];

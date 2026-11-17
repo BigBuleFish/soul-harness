@@ -5,7 +5,8 @@
  *   - store lifecycle (open / close) with the documented pragmas
  *   - migrations: loading, checksum verification, transactional execution
  *   - schema verification against the expected P1 shape
- *   - (later batches) transactions, repositories, field mapping, checkpoints
+ *   - transactions (`withWrite` / `withRead`), field mapping, checkpoints (C)
+ *   - repositories for the six P1 tables
  *
  * What this package is NOT and must never become:
  *   - no business semantics: it never decides whether an event matters, whether
@@ -38,3 +39,61 @@ export type {
   MigrateResult,
   MigrationFile,
 } from './migrations/types.js';
+
+export { withRead, withWrite } from './tx/coordinator.js';
+export type { NotPromise, ReadTx, Tx } from './tx/coordinator.js';
+
+export {
+  JSON_COLUMN_SCHEMA_KEY,
+  camelizeRow,
+  decodeJsonColumn,
+  encodeJsonColumn,
+  fromDbBoolean,
+  isMappedPair,
+  toCamelCase,
+  toDbBoolean,
+  toSnakeCase,
+} from './mapping.js';
+
+export {
+  createRepositories,
+  createEventRepository,
+  createPersonaRepository,
+  createRuntimeStateRepository,
+  createSchemaMigrationsRepository,
+  createSessionRepository,
+  createTaskRepository,
+  DEFAULT_LIST_LIMIT,
+  JSON_SCHEMA_IDS,
+  MAX_LIST_LIMIT,
+} from './repositories/index.js';
+export type {
+  EventRepository,
+  InsertEventInput,
+  InsertPersonaInput,
+  InsertSessionInput,
+  InsertTaskInput,
+  PersonaRepository,
+  Repositories,
+  RuntimeStateRepository,
+  SchemaMigrationsRepository,
+  SessionRepository,
+  TaskRepository,
+  UpdateEventStatusInput,
+  UpdatePersonaStateInput,
+  UpdateTaskStateInput,
+  UpsertRuntimeStateInput,
+  CloseSessionInput,
+} from './repositories/index.js';
+
+export { PERSONA_STATES, TASK_STATES } from './types/rows.js';
+export type {
+  AppliedMigrationRow,
+  EventRow,
+  PersonaRow,
+  PersonaState,
+  RuntimeStateRow,
+  SessionRow,
+  TaskRow,
+  TaskState,
+} from './types/rows.js';

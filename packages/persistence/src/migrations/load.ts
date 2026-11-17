@@ -76,7 +76,12 @@ export function normalizeMigrations(input: readonly MigrationFile[]): readonly M
   const byVersion = new Map<number, MigrationFile>();
 
   for (const candidate of input) {
-    const migration = createMigrationFile(candidate.version, candidate.name, candidate.file, candidate.sql);
+    const migration = createMigrationFile(
+      candidate.version,
+      candidate.name,
+      candidate.file,
+      candidate.sql,
+    );
     const previous = byVersion.get(migration.version);
     if (previous !== undefined) {
       throw new PersistenceError('migration_duplicate_version', 'two migrations share a version', {

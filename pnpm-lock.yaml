@@ -46,6 +46,10 @@ importers:
         version: 8.20.0
 
   packages/persistence:
+    dependencies:
+      '@soul-harness/contracts':
+        specifier: workspace:*
+        version: link:../contracts
     devDependencies:
       '@types/node':
         specifier: ^24.19.2

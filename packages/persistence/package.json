@@ -27,7 +27,9 @@
     "test": "vitest run",
     "check": "tsc -p tsconfig.json --noEmit && vitest run"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@soul-harness/contracts": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "^24.19.2"
   }
