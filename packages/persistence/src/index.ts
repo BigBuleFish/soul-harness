@@ -40,8 +40,10 @@ export type {
   MigrationFile,
 } from './migrations/types.js';
 
-export { withRead, withWrite } from './tx/coordinator.js';
+export { isStoreUnusable, withRead, withWrite } from './tx/coordinator.js';
 export type { NotPromise, ReadTx, Tx } from './tx/coordinator.js';
+export { firstKeyword } from './tx/statements.js';
+export type { GuardedStatement, StatementRunResult } from './tx/statements.js';
 
 export {
   JSON_COLUMN_SCHEMA_KEY,

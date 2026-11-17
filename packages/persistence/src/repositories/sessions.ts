@@ -1,4 +1,4 @@
-﻿/**
+/**
  * sessions repository.
  *
  * The partial unique index `ux_sessions_external ... WHERE closed_at IS NULL`
@@ -7,9 +7,8 @@
  */
 
 import type { AdapterId, JsonObject, PersonaId, SessionId } from '@soul-harness/contracts';
-import type { StatementSync } from 'node:sqlite';
 
-import { allRows, oneRow } from '../db/rows.js';
+import { allRows, oneRow, type StatementSource } from '../db/rows.js';
 import { databaseOf, type Store } from '../db/store.js';
 import { camelizeRow } from '../mapping.js';
 import { withWrite } from '../tx/coordinator.js';
@@ -17,10 +16,6 @@ import type { SessionRow } from '../types/rows.js';
 import { JSON_SCHEMA_IDS, assertLimit, decodeOptionalJson, encodeOptionalJson } from './shared.js';
 
 const COLUMNS = 'id, persona_id, adapter_id, external_id, opened_at, closed_at, meta_json';
-
-interface StatementSource {
-  prepare(sql: string): StatementSync;
-}
 
 export interface InsertSessionInput {
   readonly id: SessionId;

@@ -12,7 +12,7 @@ import { allRows } from '../src/db/rows.js';
 import { databaseOf } from '../src/db/store.js';
 import type { PersistenceError } from '../src/errors.js';
 import { createRepositories, withWrite, type Repositories } from '../src/index.js';
-import { closeAll, NOW, openMigratedStore } from './helpers/fixture.js';
+import { closeAll, countRows, NOW, openMigratedStore } from './helpers/fixture.js';
 
 afterEach(closeAll);
 
@@ -488,5 +488,108 @@ describe('repository writes go through the single write entry', () => {
     withWrite(store, () => {
       expect(repos.personas.list()).toStrictEqual([]);
     });
+  });
+});
+
+describe('events.summary must be NULL in P1', () => {
+  const insert = (repos: Repositories, summary?: unknown) =>
+    repos.events.insert({
+      id: EVENT,
+      personaId: PERSONA,
+      source: SOURCE,
+      adapterId: ADAPTER,
+      adapterEventRef: 'mc-1',
+      status: 'accepted',
+      receivedAt: NOW,
+      updatedAt: NOW,
+      ...(summary === undefined ? {} : { summary: summary as null }),
+    });
+
+  it('stores NULL when the field is omitted', () => {
+    const { repos } = setup();
+    seedPersona(repos);
+
+    expect(insert(repos).summary).toBeNull();
+  });
+
+  it('stores NULL when explicitly null', () => {
+    const { repos } = setup();
+    seedPersona(repos);
+
+    expect(insert(repos, null).summary).toBeNull();
+  });
+
+  it.each([
+    ['a natural language summary', 'the persona said hello'],
+    ['an empty string', ''],
+    ['whitespace', '   '],
+    ['keywords', 'hello,world'],
+  ])('rejects %s before touching the database', (_label, summary) => {
+    const { repos, store } = setup();
+    seedPersona(repos);
+
+    expect(codeOf(() => insert(repos, summary))).toBe('invalid_column_value');
+    expect(countRows(store, 'events')).toBe(0);
+  });
+});
+
+describe('events.adapterEventRef format is enforced at the write boundary', () => {
+  const insert = (repos: Repositories, adapterEventRef: string) =>
+    repos.events.insert({
+      id: EVENT,
+      personaId: PERSONA,
+      source: SOURCE,
+      adapterId: ADAPTER,
+      adapterEventRef,
+      status: 'accepted',
+      receivedAt: NOW,
+      updatedAt: NOW,
+    });
+
+  it.each(['a', 'A', '0', 'mc-1', 'qq:group.1', 'x'.repeat(64), 'aB3._:-'])('accepts %j', (ref) => {
+    const { repos } = setup();
+    seedPersona(repos);
+
+    expect(insert(repos, ref).adapterEventRef).toBe(ref);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['blank', ' '],
+    ['newline', '\n'],
+    ['tab', 'a\tb'],
+    ['non-ascii', '中文'],
+    ['slash', 'a/b'],
+    ['space inside', 'a b'],
+    ['too long', 'x'.repeat(65)],
+  ])('rejects %s', (_label, ref) => {
+    const { repos, store } = setup();
+    seedPersona(repos);
+
+    expect(codeOf(() => insert(repos, ref))).toBe('invalid_identifier');
+    expect(countRows(store, 'events')).toBe(0);
+  });
+
+  it('does not trim or normalise the value', () => {
+    const { repos, store } = setup();
+    seedPersona(repos);
+
+    expect(codeOf(() => insert(repos, ' mc-1 '))).toBe('invalid_identifier');
+    expect(countRows(store, 'events')).toBe(0);
+  });
+
+  it('keeps the dedupe lookup working for a valid reference', () => {
+    const { repos } = setup();
+    seedPersona(repos);
+
+    const created = insert(repos, 'mc-1');
+    expect(
+      repos.events.findByDedupeKey({
+        personaId: PERSONA,
+        adapterId: ADAPTER,
+        source: SOURCE,
+        adapterEventRef: 'mc-1',
+      })?.id,
+    ).toBe(created.id);
   });
 });

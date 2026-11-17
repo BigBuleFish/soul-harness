@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { databaseOf } from '../src/db/store.js';
 import type { PersistenceError } from '../src/errors.js';
 import { withWrite, type Tx } from '../src/index.js';
 import { closeAll, countRows, NOW, openMigratedStore } from './helpers/fixture.js';
@@ -17,6 +18,8 @@ function codeOf(run: () => unknown): string {
   }
   throw new Error('expected the call to throw');
 }
+
+type Prepared = ReturnType<Tx['prepare']>;
 
 describe('withWrite — commit and rollback', () => {
   it('commits when the callback returns normally', () => {
@@ -123,19 +126,61 @@ describe('withWrite — callback must be synchronous', () => {
   });
 });
 
-describe('withWrite — transaction boundaries', () => {
-  it('invalidates the handle once the transaction ended', () => {
+describe('withWrite — the handle cannot outlive the transaction', () => {
+  it('rejects a statement captured inside the callback', () => {
     const store = openMigratedStore();
-    let captured: Tx | undefined;
+    let captured: Prepared | undefined;
 
     withWrite(store, (tx) => {
-      captured = tx;
       tx.prepare(INSERT_PERSONA).run('psn_1', 'Primary', 'CREATED', NOW, NOW);
+      captured = tx.prepare(INSERT_PERSONA);
     });
 
-    expect(captured).toBeDefined();
-    expect(codeOf(() => (captured as Tx).exec(INSERT_PERSONA))).toBe('transaction_closed');
+    const statement = captured as NonNullable<Prepared>;
+    expect(codeOf(() => statement.run('psn_2', 'x', 'CREATED', NOW, NOW))).toBe(
+      'transaction_closed',
+    );
     expect(countRows(store, 'personas')).toBe(1);
+  });
+
+  it('rejects a statement captured in a transaction that rolled back', () => {
+    const store = openMigratedStore();
+    let captured: Prepared | undefined;
+
+    expect(() =>
+      withWrite(store, (tx) => {
+        captured = tx.prepare(INSERT_PERSONA);
+        throw new Error('abort');
+      }),
+    ).toThrow('abort');
+
+    const statement = captured as NonNullable<Prepared>;
+    expect(codeOf(() => statement.run('psn_9', 'x', 'CREATED', NOW, NOW))).toBe(
+      'transaction_closed',
+    );
+    expect(countRows(store, 'personas')).toBe(0);
+  });
+
+  it('rejects an iterator consumed after the transaction ended', () => {
+    const store = openMigratedStore();
+    let capturedIterator: Iterator<unknown> | undefined;
+
+    withWrite(store, (tx) => {
+      tx.prepare(INSERT_PERSONA).run('psn_1', 'Primary', 'CREATED', NOW, NOW);
+      capturedIterator = tx.prepare('SELECT id FROM personas').iterate();
+    });
+
+    expect(capturedIterator).toBeDefined();
+    expect(codeOf(() => (capturedIterator as Iterator<unknown>).next())).toBe('transaction_closed');
+  });
+
+  it('exposes no arbitrary SQL entry point on the transaction handle', () => {
+    const store = openMigratedStore();
+
+    withWrite(store, (tx) => {
+      expect('exec' in tx).toBe(false);
+      expect(Object.keys(tx).sort()).toStrictEqual(['kind', 'prepare']);
+    });
   });
 
   it('refuses to start a transaction on a closed store', () => {
@@ -165,5 +210,8 @@ describe('withWrite — concurrent callers do not interleave', () => {
 
     expect(trace).toStrictEqual(['psn_a:start', 'psn_a:end', 'psn_b:start', 'psn_b:end']);
     expect(countRows(store, 'personas')).toBe(2);
+    // Connection is still healthy after both transactions.
+    const probe = databaseOf(store).prepare('SELECT 1 AS ok').get() as { ok?: number } | undefined;
+    expect(probe?.ok).toBe(1);
   });
 });

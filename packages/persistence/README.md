@@ -62,13 +62,19 @@ withRead(store, (tx) => T): T
 | 异步回调 | 运行时检测 thenable → `async_callback_unsupported`（回滚），**不做半支持** |
 | 嵌套写 | 任何模式下的 `withWrite` 嵌套 → `nested_write` |
 | 读嵌套 | `withRead` 在外层事务内**加入**外层（不新开事务、不切 `query_only`） |
-| 只读强制 | `withRead` 期间 `PRAGMA query_only = ON`，写入被 SQLite 拒绝（`read_only_violation`） |
-| 句柄生命周期 | 事务结束后 `Tx` 失效，再调用 → `transaction_closed` |
+| 只读强制 | `withRead` 期间 `PRAGMA query_only = ON`（连接层），且读接口只允许 prepare `SELECT/WITH/VALUES/EXPLAIN` |
+| 事务控制权 | 回调**没有** `exec`，只有 `prepare()`；`BEGIN/COMMIT/END/ROLLBACK/SAVEPOINT/RELEASE/PRAGMA/ATTACH/DETACH/VACUUM` 一律 `statement_blocked` |
+| 语句生命周期 | 每次 `run/get/all` 与迭代器每次 `next()` 都检查事务是否仍 active；事务结束后 → `transaction_closed` |
+| 句柄形态 | `Tx`（`kind: 'write'`）与 `ReadTx`（`kind: 'read'`）是不同类型，不可互换 |
+| 清理失败 | `query_only` 恢复失败 → Store 标记为不可用（`store_unusable`），且不覆盖原始错误 |
 | 错误保真 | 非 SQLite 错误原样抛出（identity 不变）；SQLite 错误分类后带 `cause` |
 | 关闭后 | `store_closed`，不会静默重开 |
 
 > **设计取舍**：不提供异步事务。`node:sqlite` 是同步 API，允许 `await` 会把事务拉长到跨越提交点之外，
 > 正是"异步操作在事务结束后继续写库"的成因。需要异步工作时，应在事务**外**完成。
+>
+> **SQL 能力闸门**不是子串黑名单：它取注释与空白之后的**首个关键字**判定（`firstKeyword()`），
+> 且依赖 `node:sqlite` 只准备第一条语句的行为（实测：`SELECT 1; SELECT 2` 只执行第一条）。
 
 ## 6. 字段映射
 
@@ -89,7 +95,7 @@ withRead(store, (tx) => T): T
 |---|---|
 | `personas` | `insert` / `getById` / `updateState`（版本自增）/ `list(limit)` |
 | `sessions` | `insert` / `getById` / `findActiveByExternal` / `close` / `listByPersona` |
-| `events` | `insert`（archive 三列不可设）/ `getById` / `findByDedupeKey` / `updateStatus` / `listByPersonaStatus` |
+| `events` | `insert`（archive 三列不可设；`summary` 只接受 NULL；`adapterEventRef` 强制格式）/ `getById` / `findByDedupeKey` / `updateStatus` / `listByPersonaStatus` |
 | `tasks` | `insert` / `getById` / `updateState` / `listByPersonaState` |
 | `runtime_state` | `upsert`（不触碰 checkpoint）/ `get` |
 | `schema_migrations` | **只读**：`listApplied` / `getLatest` |
@@ -98,6 +104,15 @@ withRead(store, (tx) => T): T
 - 列表查询默认 50、上限 500，越界 → `invalid_argument`，不存在"全表读取"入口。
 - 错误区分：`unique_conflict` / `foreign_key_violation` / `check_violation` / `not_null_violation` / `db_error`。
 - 返回 `null` 表示"不存在"（`getById`）或"未命中/未变更"（`updateState` 返回 `null`、`close` 返回 `false`）。
+
+### 写入边界的两条硬校验（SH-006B.R1）
+
+| 规则 | 行为 |
+|---|---|
+| `events.summary` 在 P1 只能为 NULL | 类型为 `summary?: null`；运行时任何非 NULL 值 → `invalid_column_value`，且**在事务开启前**拒绝，数据库不受影响（DATA-MODEL §3.1：摘要属内容，不得落库） |
+| `adapterEventRef` 必须匹配 `^[A-Za-z0-9._:-]{1,64}$` | 复用 contracts 的 `isAdapterEventRef`；空串、超长、空白、换行、中文、非法字符 → `invalid_identifier`；**不 trim、不修复**；去重键行为不变 |
+
+> 未追加数据库层 CHECK（会需要重建表）；当前由写入边界强制，`0001_init_core.sql` 保持原样。
 
 ## 8. Migration 机制
 

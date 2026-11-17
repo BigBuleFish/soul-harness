@@ -24,6 +24,10 @@ export const PERSISTENCE_ERROR_CODES = [
   'read_only_violation',
   'async_callback_unsupported',
   'transaction_closed',
+  'statement_blocked',
+  'store_unusable',
+  // identifiers
+  'invalid_identifier',
   // database errors
   'unique_conflict',
   'foreign_key_violation',

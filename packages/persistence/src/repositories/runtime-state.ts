@@ -19,7 +19,7 @@ const COLUMNS = 'persona_id, state, boot_id, epoch, updated_at';
 
 export interface UpsertRuntimeStateInput {
   readonly personaId: PersonaId;
-  /** Lifecycle state name from RUNTIME-LIFECYCLE 搂2 (free text by design). */
+  /** Lifecycle state name from RUNTIME-LIFECYCLE §2 (free text by design). */
   readonly state: string;
   readonly bootId?: BootId | null;
   readonly epoch: number;

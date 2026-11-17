@@ -1,15 +1,14 @@
-﻿/**
+/**
  * tasks repository.
  *
- * `payload_json` is wrapped with a shape version (DATA-MODEL 搂1) and may only
- * carry references 鈥?the repository cannot enforce that, but it refuses to store
+ * `payload_json` is wrapped with a shape version (DATA-MODEL §1) and may only
+ * carry references —the repository cannot enforce that, but it refuses to store
  * a JSON column whose schema marker it did not write itself.
  */
 
 import type { Channel, JsonObject, PersonaId, TaskId } from '@soul-harness/contracts';
-import type { StatementSync } from 'node:sqlite';
 
-import { allRows, oneRow } from '../db/rows.js';
+import { allRows, oneRow, type StatementSource } from '../db/rows.js';
 import { databaseOf, type Store } from '../db/store.js';
 import { camelizeRow } from '../mapping.js';
 import { withWrite } from '../tx/coordinator.js';
@@ -30,10 +29,6 @@ const COLUMNS = [
   'finished_at',
   'attempt',
 ].join(', ');
-
-interface StatementSource {
-  prepare(sql: string): StatementSync;
-}
 
 export interface InsertTaskInput {
   readonly id: TaskId;

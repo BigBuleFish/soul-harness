@@ -1,15 +1,14 @@
 ﻿/**
  * personas repository.
  *
- * `version` is bumped by the database statement (DATA-MODEL 搂1 / 搂6: every
+ * `version` is bumped by the database statement (DATA-MODEL §1 / §6: every
  * committed change increments it); the repository never accepts a version from
  * the caller, so it cannot be spoofed.
  */
 
 import type { BootId, PersonaId } from '@soul-harness/contracts';
-import type { StatementSync } from 'node:sqlite';
 
-import { allRows, oneRow } from '../db/rows.js';
+import { allRows, oneRow, type StatementSource } from '../db/rows.js';
 import { databaseOf, type Store } from '../db/store.js';
 import { camelizeRow } from '../mapping.js';
 import { withWrite } from '../tx/coordinator.js';
@@ -17,11 +16,6 @@ import type { PersonaRow, PersonaState } from '../types/rows.js';
 import { assertLimit } from './shared.js';
 
 const COLUMNS = 'id, display_name, state, version, epoch, boot_id, created_at, updated_at';
-
-/** Anything that can prepare a statement: a live database or a transaction handle. */
-interface StatementSource {
-  prepare(sql: string): StatementSync;
-}
 
 export interface InsertPersonaInput {
   readonly id: PersonaId;

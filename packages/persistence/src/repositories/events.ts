@@ -1,14 +1,15 @@
-﻿/**
+/**
  * events repository.
  *
  * Two invariants are encoded structurally:
  *   1. `insert` cannot set any archive column. In P1 there is no Archive Writer,
  *      so `archive_ref` / `archive_disposition` must stay NULL and
- *      `archive_state` must stay 'none' (DATA-MODEL 搂2.1, PLAN 搂6.3).
+ *      `archive_state` must stay 'none' (DATA-MODEL §2.1, PLAN §6.3).
  *   2. The dedupe key lookup uses the unique index
  *      `(persona_id, adapter_id, source, adapter_event_ref)` rather than a scan.
  */
 
+import { isAdapterEventRef } from '@soul-harness/contracts';
 import type {
   AdapterId,
   AttentionOutcome,
@@ -22,10 +23,10 @@ import type {
   ArchiveRef,
   ArchiveState,
 } from '@soul-harness/contracts';
-import type { StatementSync } from 'node:sqlite';
 
-import { allRows, oneRow } from '../db/rows.js';
+import { allRows, oneRow, type StatementSource } from '../db/rows.js';
 import { databaseOf, type Store } from '../db/store.js';
+import { PersistenceError } from '../errors.js';
 import { camelizeRow } from '../mapping.js';
 import { withWrite } from '../tx/coordinator.js';
 import type { EventRow } from '../types/rows.js';
@@ -51,10 +52,6 @@ const COLUMNS = [
   'status_reason',
 ].join(', ');
 
-interface StatementSource {
-  prepare(sql: string): StatementSync;
-}
-
 export interface InsertEventInput {
   readonly id: EventId;
   readonly personaId: PersonaId;
@@ -65,16 +62,44 @@ export interface InsertEventInput {
   readonly status: EventStatus;
   readonly attentionOutcome?: AttentionOutcome | null;
   readonly salience?: number;
-  readonly summary?: string | null;
+  /**
+   * P1 stores no summary at all (DATA-MODEL §3.1): the column may only be NULL.
+   * The type carries that restriction, and `assertInsertInput` re-checks it at
+   * runtime because JavaScript callers bypass the type.
+   */
+  readonly summary?: null;
   readonly receivedAt: number;
   readonly occurredAt?: number | null;
   readonly updatedAt: number;
 }
 
+/**
+ * Rejects anything the database would accept but the data model forbids.
+ *
+ * Both checks run BEFORE the write transaction opens, so a rejected call leaves
+ * the database untouched.
+ */
+function assertInsertInput(input: InsertEventInput): void {
+  if (input.summary !== undefined && input.summary !== null) {
+    throw new PersistenceError(
+      'invalid_column_value',
+      'events.summary must be NULL in P1; summaries are content, not metadata',
+      { details: { column: 'summary' } },
+    );
+  }
+  if (!isAdapterEventRef(input.adapterEventRef)) {
+    throw new PersistenceError(
+      'invalid_identifier',
+      'adapterEventRef must match ^[A-Za-z0-9._:-]{1,64}$',
+      { details: { field: 'adapterEventRef' } },
+    );
+  }
+}
+
 export interface UpdateEventStatusInput {
   readonly id: EventId;
   readonly status: EventStatus;
-  /** Must be non-null exactly for the terminal statuses (DATA-MODEL 搂3.4). */
+  /** Must be non-null exactly for the terminal statuses (DATA-MODEL §3.4). */
   readonly statusReason: StatusReason | null;
   readonly attentionOutcome: AttentionOutcome | null;
   readonly updatedAt: number;
@@ -114,6 +139,8 @@ function selectById(source: StatementSource, id: EventId): EventRow | null {
 export function createEventRepository(store: Store) {
   return {
     insert(input: InsertEventInput): EventRow {
+      assertInsertInput(input);
+
       return withWrite(store, (tx) => {
         // Archive columns are intentionally absent: P1 has no Archive Writer.
         tx.prepare(
