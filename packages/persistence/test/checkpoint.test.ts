@@ -2,12 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { PersonaId, RunId, ThreadId } from '@soul-harness/contracts';
 
 import {
+  CHECKPOINT_CURSOR_PATTERN,
   CHECKPOINT_MAX_BYTES,
   CHECKPOINT_SCHEMA,
   CHECKPOINT_VERSION,
   createRepositories,
   decodeCheckpoint,
   encodeCheckpoint,
+  isOpaqueCursor,
   isStoreUnusable,
   migrate,
   openStore,
@@ -640,6 +642,105 @@ describe('envelope format helpers', () => {
   it('rejects a negative or non-integer epoch', () => {
     expect(codeOf(() => encodeCheckpoint(-1))).toBe('checkpoint_invalid');
     expect(codeOf(() => encodeCheckpoint(1.5))).toBe('checkpoint_invalid');
+  });
+});
+
+describe('cursor validation is exact-match (no anchor or newline leniency)', () => {
+  const VALID_CURSORS = ['scheduler', 'sched:0:17', 'cursor_v1.2-3', 'x'.repeat(128)];
+
+  const INVALID_CURSORS: ReadonlyArray<{ label: string; cursor: string }> = [
+    { label: 'trailing newline', cursor: 'scheduler\n' },
+    { label: 'trailing CRLF', cursor: 'scheduler\r\n' },
+    { label: 'trailing CR', cursor: 'scheduler\r' },
+    { label: 'embedded space', cursor: 'scheduler with space' },
+    { label: 'trailing tab', cursor: 'scheduler\t' },
+    { label: 'empty string', cursor: '' },
+    { label: 'over 128 characters', cursor: 'x'.repeat(129) },
+    { label: 'leading newline', cursor: '\nscheduler' },
+    { label: 'embedded NUL', cursor: 'sched\u0000' },
+  ];
+
+  it.each(VALID_CURSORS)('accepts %j through encode and decode', (cursor) => {
+    const text = encodeCheckpoint(1, { cursor });
+    expect(decodeCheckpoint(text).refs?.cursor).toBe(cursor);
+    expect(isOpaqueCursor(cursor)).toBe(true);
+  });
+
+  it.each(INVALID_CURSORS)('rejects $label on encode', ({ cursor }) => {
+    expect(codeOf(() => encodeCheckpoint(1, { cursor }))).toBe('checkpoint_invalid');
+    expect(isOpaqueCursor(cursor)).toBe(false);
+  });
+
+  it.each(INVALID_CURSORS)('rejects $label on decode', ({ cursor }) => {
+    const text = JSON.stringify({
+      schema: CHECKPOINT_SCHEMA,
+      version: CHECKPOINT_VERSION,
+      epoch: 1,
+      refs: { cursor },
+    });
+
+    expect(codeOf(() => decodeCheckpoint(text))).toBe('checkpoint_invalid');
+  });
+
+  it('repository.load rejects a stored trailing-newline cursor instead of reporting absent', () => {
+    const { store, repos } = setup(1);
+    const text = JSON.stringify({
+      schema: CHECKPOINT_SCHEMA,
+      version: CHECKPOINT_VERSION,
+      epoch: 1,
+      refs: { cursor: 'scheduler\n' },
+    });
+    writeRawCheckpoint(store, text);
+
+    expect(codeOf(() => repos.checkpoints.load(PERSONA))).toBe('checkpoint_invalid');
+    // Not "absent", and the read did not rewrite it.
+    expect(runtimeRow(store)?.checkpoint_json).toBe(text);
+  });
+
+  it('repository.load rejects a stored tab cursor', () => {
+    const { store, repos } = setup(1);
+    writeRawCheckpoint(
+      store,
+      JSON.stringify({
+        schema: CHECKPOINT_SCHEMA,
+        version: CHECKPOINT_VERSION,
+        epoch: 1,
+        refs: { cursor: 'scheduler\t' },
+      }),
+    );
+
+    expect(codeOf(() => repos.checkpoints.load(PERSONA))).toBe('checkpoint_invalid');
+  });
+
+  it('repository.save rejects an invalid cursor before touching the database', () => {
+    const { store, repos } = setup(1);
+    repos.checkpoints.save({
+      personaId: PERSONA,
+      epoch: 1,
+      refs: { cursor: 'original' },
+      updatedAt: NOW + 1,
+    });
+    const before = runtimeRow(store)?.checkpoint_json;
+
+    for (const { cursor } of INVALID_CURSORS) {
+      expect(
+        codeOf(() =>
+          repos.checkpoints.save({
+            personaId: PERSONA,
+            epoch: 1,
+            refs: { cursor },
+            updatedAt: NOW + 2,
+          }),
+        ),
+      ).toBe('checkpoint_invalid');
+    }
+
+    expect(runtimeRow(store)?.checkpoint_json).toBe(before);
+    expect(repos.checkpoints.load(PERSONA).status).toBe('present');
+  });
+
+  it('keeps the published pattern in sync with the documented wire shape', () => {
+    expect(CHECKPOINT_CURSOR_PATTERN).toBe('^[A-Za-z0-9._:-]{1,128}$');
   });
 });
 

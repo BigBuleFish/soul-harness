@@ -156,7 +156,7 @@ const stored = checkpoints.save({ personaId, epoch, refs?, updatedAt });
 | `schema` | 必须是 `soul.runtime.checkpoint.v1`，否则 `checkpoint_version_unsupported` |
 | `version` | 必须是 `1`；其他值（含字符串）→ `checkpoint_version_unsupported` / `checkpoint_invalid` |
 | `epoch` | 非负整数；`save` 时**必须等于** `runtime_state.epoch`，否则 `checkpoint_epoch_mismatch` |
-| `refs` | 可选；只允许 `cursor`（`^[A-Za-z0-9._:-]{1,128}$`）、`threadIds`、`runIds`（contracts 品牌 ID，各 ≤256） |
+| `refs` | 可选；只允许 `cursor`（`^[A-Za-z0-9._:-]{1,128}$`，**整串精确匹配**）、`threadIds`、`runIds`（contracts 品牌 ID，各 ≤256） |
 | 未知字段 | 一律拒绝（`checkpoint_invalid`）——防止未来写入方夹带正文 |
 | 大小上限 | 64 KiB |
 | 缺失 / 损坏 | 缺失 → `absent`；非法 JSON、缺字段、类型错误、超限 → `checkpoint_invalid`（**不得当作空检查点**） |

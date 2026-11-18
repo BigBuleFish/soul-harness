@@ -39,10 +39,52 @@ export const CHECKPOINT_MAX_BYTES = 65_536;
 /** Upper bound on each reference list. */
 export const CHECKPOINT_MAX_REFS = 256;
 
-/** Cursor tokens are opaque: no spaces, no prose, no paths. */
+/**
+ * Wire shape of an opaque cursor token (published for consumers/documentation).
+ *
+ * Validation deliberately does NOT compile this pattern: anchor semantics are a
+ * per-language property, and `$` behaves differently across engines (Python and
+ * PCRE match before a final newline; JavaScript without `m` does not — adding
+ * `m` in a later refactor would silently make it permissive). `isOpaqueCursor`
+ * below accepts only an exact set of ASCII code points, so strictness is
+ * structural rather than dependent on flags.
+ */
 export const CHECKPOINT_CURSOR_PATTERN = '^[A-Za-z0-9._:-]{1,128}$';
 
-const CURSOR = new RegExp(CHECKPOINT_CURSOR_PATTERN, 'u');
+const CURSOR_MIN_LENGTH = 1;
+const CURSOR_MAX_LENGTH = 128;
+
+/**
+ * Exact-match cursor validation: 1–128 ASCII letters/digits/`.`/`_`/`:`/`-`.
+ *
+ * Implemented as an explicit code-point scan:
+ *   - no anchors, so no engine-specific "end of line vs end of input" behaviour
+ *   - newline (`\n`, `\r`), tab, spaces, NUL and every other control character
+ *     fail by construction — they are simply not in the accepted set
+ *   - surrogate pairs and other non-ASCII code points fail as well
+ */
+export function isOpaqueCursor(value: unknown): value is string {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  if (value.length < CURSOR_MIN_LENGTH || value.length > CURSOR_MAX_LENGTH) {
+    return false;
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const isDigit = code >= 0x30 && code <= 0x39;
+    const isUpper = code >= 0x41 && code <= 0x5a;
+    const isLower = code >= 0x61 && code <= 0x7a;
+    const isSeparator = code === 0x2e || code === 0x5f || code === 0x3a || code === 0x2d;
+
+    if (!isDigit && !isUpper && !isLower && !isSeparator) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
 const ENVELOPE_KEYS: ReadonlySet<string> = new Set(['schema', 'version', 'epoch', 'refs']);
 const REFS_KEYS: ReadonlySet<string> = new Set(['cursor', 'threadIds', 'runIds']);
@@ -117,7 +159,7 @@ function normalizeRefs(refs: CheckpointRefs | undefined): CheckpointRefs | undef
 
   const cursor = record['cursor'];
   if (cursor !== undefined) {
-    if (typeof cursor !== 'string' || !CURSOR.test(cursor)) {
+    if (!isOpaqueCursor(cursor)) {
       throw invalid('checkpoint cursor must be an opaque token');
     }
     normalized.cursor = cursor;

@@ -101,6 +101,7 @@ export {
   CHECKPOINT_VERSION,
   decodeCheckpoint,
   encodeCheckpoint,
+  isOpaqueCursor,
 } from './checkpoint/format.js';
 export type { Checkpoint, CheckpointRefs } from './checkpoint/format.js';
 
