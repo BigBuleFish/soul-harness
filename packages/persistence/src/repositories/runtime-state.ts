@@ -10,7 +10,8 @@
 import type { BootId, PersonaId } from '@soul-harness/contracts';
 
 import { oneRow } from '../db/rows.js';
-import { databaseOf, type Store } from '../db/store.js';
+import { readDatabaseOf } from '../db/read.js';
+import type { Store } from '../db/store.js';
 import { camelizeRow } from '../mapping.js';
 import { withWrite } from '../tx/coordinator.js';
 import type { RuntimeStateRow } from '../types/rows.js';
@@ -71,7 +72,7 @@ export function createRuntimeStateRepository(store: Store) {
 
     get(personaId: PersonaId): RuntimeStateRow | null {
       const raw = oneRow<Record<string, unknown>>(
-        databaseOf(store).prepare(`SELECT ${COLUMNS} FROM runtime_state WHERE persona_id = ?`),
+        readDatabaseOf(store).prepare(`SELECT ${COLUMNS} FROM runtime_state WHERE persona_id = ?`),
         personaId,
       );
       return raw === undefined ? null : mapRuntimeState(raw);

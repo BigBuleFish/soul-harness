@@ -25,7 +25,8 @@ import type {
 } from '@soul-harness/contracts';
 
 import { allRows, oneRow, type StatementSource } from '../db/rows.js';
-import { databaseOf, type Store } from '../db/store.js';
+import { readDatabaseOf } from '../db/read.js';
+import type { Store } from '../db/store.js';
 import { PersistenceError } from '../errors.js';
 import { camelizeRow } from '../mapping.js';
 import { withWrite } from '../tx/coordinator.js';
@@ -174,7 +175,7 @@ export function createEventRepository(store: Store) {
     },
 
     getById(id: EventId): EventRow | null {
-      return selectById(databaseOf(store), id);
+      return selectById(readDatabaseOf(store), id);
     },
 
     /** Uses `ux_events_dedupe`; returns the existing event for the same stimulus. */
@@ -185,7 +186,7 @@ export function createEventRepository(store: Store) {
       readonly adapterEventRef: string;
     }): EventRow | null {
       const raw = oneRow<Record<string, unknown>>(
-        databaseOf(store).prepare(
+        readDatabaseOf(store).prepare(
           `SELECT ${COLUMNS} FROM events
            WHERE persona_id = ? AND adapter_id = ? AND source = ? AND adapter_event_ref = ?
            LIMIT 1`,
@@ -227,7 +228,7 @@ export function createEventRepository(store: Store) {
     }): readonly EventRow[] {
       const bounded = assertLimit(input.limit);
       const rows = allRows<Record<string, unknown>>(
-        databaseOf(store).prepare(
+        readDatabaseOf(store).prepare(
           `SELECT ${COLUMNS} FROM events
            WHERE persona_id = ? AND status = ?
            ORDER BY received_at DESC LIMIT ?`,

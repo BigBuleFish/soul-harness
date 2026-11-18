@@ -93,6 +93,20 @@ function markUnusable(store: Store, reason: PersistenceError): void {
 }
 
 function assertUsable(store: Store): void {
+  assertStoreUsable(store);
+}
+
+/**
+ * Guard for code that reaches the database outside a transaction.
+ *
+ * Repository *reads* go straight to `databaseOf` (no transaction needed), so they
+ * would otherwise keep working on a poisoned store while writes correctly failed.
+ * They call this first so "unusable" means every operation, not just writes.
+ *
+ * Not re-exported from the package entry point: it is an internal contract
+ * between the coordinator and the repositories, not a consumer API.
+ */
+export function assertStoreUsable(store: Store): void {
   if (!unusable.has(store)) {
     return;
   }

@@ -9,7 +9,8 @@
 import type { Channel, JsonObject, PersonaId, TaskId } from '@soul-harness/contracts';
 
 import { allRows, oneRow, type StatementSource } from '../db/rows.js';
-import { databaseOf, type Store } from '../db/store.js';
+import { readDatabaseOf } from '../db/read.js';
+import type { Store } from '../db/store.js';
 import { camelizeRow } from '../mapping.js';
 import { withWrite } from '../tx/coordinator.js';
 import type { TaskRow, TaskState } from '../types/rows.js';
@@ -113,7 +114,7 @@ export function createTaskRepository(store: Store) {
     },
 
     getById(id: TaskId): TaskRow | null {
-      return selectById(databaseOf(store), id);
+      return selectById(readDatabaseOf(store), id);
     },
 
     /** Returns the updated row, or null when no task has that id. */
@@ -139,7 +140,7 @@ export function createTaskRepository(store: Store) {
     }): readonly TaskRow[] {
       const bounded = assertLimit(input.limit);
       const rows = allRows<Record<string, unknown>>(
-        databaseOf(store).prepare(
+        readDatabaseOf(store).prepare(
           `SELECT ${COLUMNS} FROM tasks
            WHERE persona_id = ? AND state = ?
            ORDER BY scheduled_at IS NULL, scheduled_at, id

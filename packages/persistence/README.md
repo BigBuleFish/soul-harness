@@ -2,7 +2,11 @@
 
 - **地位**：P1 唯一的 SQLite 访问层。任何模块都不得自行打开数据库文件、转换字段名或直接写表。
 - **状态**：**批次 A（数据库基础与 Migration）+ 批次 B（事务、字段映射、六表 Repository）+
-  批次 C（检查点读写与恢复读取）已完成**。恢复 Runtime 对象、认知状态重建与生命周期编排属后续阶段。
+  批次 C（检查点读写与恢复读取）+ 批次 D（集成验收）已完成**。
+  恢复 Runtime 对象、认知状态重建与生命周期编排属后续阶段。
+- **集成验收**：`test/integration.test.ts` 覆盖真实文件的完整链路（open → migrate → 六表读写 →
+  检查点 → close → 重新 open → 再 migrate → 读回），并在 `tools/consumer-check` 中以包名导入、
+  真实建库跑通一次消费流程。
 - **上位文档**：[DATA-MODEL](docs/architecture/DATA-MODEL.md) §1/§3/§6/§8、[MODULES](docs/architecture/MODULES.md) §2–§3、
   [RUNTIME-LIFECYCLE](docs/architecture/RUNTIME-LIFECYCLE.md) §2/§9、[TRUST-BOUNDARIES](docs/architecture/TRUST-BOUNDARIES.md) §5.1/§11.3。
 
@@ -70,6 +74,7 @@ withRead(store, (tx) => T): T
 | 句柄形态 | `Tx`（`kind: 'write'`）与 `ReadTx`（`kind: 'read'`）是不同类型，不可互换 |
 | 清理失败 | 读守卫恢复失败 → Store 标记 `store_unusable`；若回调本身成功，**调用整体失败**并抛出 `store_unusable`，绝不返回正常结果 |
 | 事务失效 | Store 一旦 unusable，**当前活动事务同步失效**：新 `prepare` 抛 `store_unusable`，此前已 prepare 的语句抛 `transaction_closed`，`withWrite` 拒绝 COMMIT 并回滚 |
+| 全操作失效 | unusable 后 **Repository 的读也随之拒绝**（`readDatabaseOf` 守卫），不只是写 |
 | 错误保真 | 非 SQLite 错误原样抛出（identity 不变）；SQLite 错误分类后带 `cause` |
 | 关闭后 | `store_closed`，不会静默重开 |
 

@@ -2,9 +2,10 @@
  * Cross-package consumer check — compile half.
  *
  * This file is deliberately NOT part of `packages/contracts`: it exists to prove
- * that another workspace package can consume `@soul-harness/contracts` through
- * its published entry points (package name, not a relative path), and that the
- * emitted `.d.ts` carries the intended types — including the negative ones.
+ * that another workspace package can consume `@soul-harness/contracts` and
+ * `@soul-harness/persistence` through their published entry points (package name,
+ * not a relative path), and that the emitted `.d.ts` carries the intended types —
+ * including the negative ones.
  *
  * It is typechecked by `pnpm run check:consumer`; it is never shipped.
  */
@@ -22,6 +23,21 @@ import {
   type SourceId,
   type StimulusInputV1,
 } from '@soul-harness/contracts';
+import {
+  CHECKPOINT_SCHEMA,
+  CHECKPOINT_VERSION,
+  PersistenceError,
+  createRepositories,
+  isPersistenceError,
+  openStore,
+  withRead,
+  withWrite,
+  type Checkpoint,
+  type CheckpointLoadResult,
+  type ReadTx,
+  type Store,
+  type Tx,
+} from '@soul-harness/persistence';
 
 export const personaId: PersonaId = 'psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC' as PersonaId;
 
@@ -46,3 +62,27 @@ export const appendResponse: ArchiveAppendResponse = { result: 'conflict' };
 export const schemaCount: number = Object.keys(SCHEMAS).length;
 export const canonicalMessage: string = ERROR_MESSAGES.schema_invalid;
 export const personaLooksValid: boolean = isPersonaId(personaId);
+
+// --- persistence: the package must be usable from the outside -----------------
+
+export const store: Store = openStore({ file: '.consumer-check.db' });
+export const errorCode: string = new PersistenceError('store_closed', 'x').code;
+export const isError: boolean = isPersistenceError(new PersistenceError('store_closed', 'x'));
+
+export const checkpoint: Checkpoint = {
+  schema: CHECKPOINT_SCHEMA,
+  version: CHECKPOINT_VERSION,
+  epoch: 1,
+};
+
+export const writeScope = <T>(fn: (tx: Tx) => T): T => withWrite(store, fn);
+export const readScope = <T>(fn: (tx: ReadTx) => T): T => withRead(store, fn);
+
+// @ts-expect-error a Tx handle exposes `prepare` only — there is no arbitrary exec
+export const escapeAttempt = (tx: Tx): void => tx.exec('COMMIT');
+
+// @ts-expect-error a ReadTx is not a write Tx (the `kind` discriminants differ)
+export const readAsWrite = (tx: ReadTx): Tx => tx;
+
+export const loadResult = (persona: PersonaId): CheckpointLoadResult =>
+  createRepositories(store).checkpoints.load(persona);

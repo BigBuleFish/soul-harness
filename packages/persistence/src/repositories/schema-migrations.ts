@@ -9,7 +9,8 @@
  */
 
 import { allRows, oneRow } from '../db/rows.js';
-import { databaseOf, type Store } from '../db/store.js';
+import { readDatabaseOf } from '../db/read.js';
+import type { Store } from '../db/store.js';
 import { camelizeRow } from '../mapping.js';
 import type { AppliedMigrationRow } from '../types/rows.js';
 
@@ -29,14 +30,14 @@ export function createSchemaMigrationsRepository(store: Store) {
   return {
     listApplied(): readonly AppliedMigrationRow[] {
       const rows = allRows<Record<string, unknown>>(
-        databaseOf(store).prepare(`SELECT ${COLUMNS} FROM schema_migrations ORDER BY version`),
+        readDatabaseOf(store).prepare(`SELECT ${COLUMNS} FROM schema_migrations ORDER BY version`),
       );
       return rows.map(mapApplied);
     },
 
     getLatest(): AppliedMigrationRow | null {
       const raw = oneRow<Record<string, unknown>>(
-        databaseOf(store).prepare(
+        readDatabaseOf(store).prepare(
           `SELECT ${COLUMNS} FROM schema_migrations ORDER BY version DESC LIMIT 1`,
         ),
       );

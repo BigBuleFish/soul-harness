@@ -23,6 +23,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@soul-harness/contracts": "workspace:*",
+    "@soul-harness/persistence": "workspace:*",
     "@types/node": "^24.19.2",
     "eslint": "^10.15.0",
     "prettier": "^3.6.0",

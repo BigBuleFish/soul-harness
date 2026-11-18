@@ -9,7 +9,8 @@
 import type { BootId, PersonaId } from '@soul-harness/contracts';
 
 import { allRows, oneRow, type StatementSource } from '../db/rows.js';
-import { databaseOf, type Store } from '../db/store.js';
+import { readDatabaseOf } from '../db/read.js';
+import type { Store } from '../db/store.js';
 import { camelizeRow } from '../mapping.js';
 import { withWrite } from '../tx/coordinator.js';
 import type { PersonaRow, PersonaState } from '../types/rows.js';
@@ -80,7 +81,7 @@ export function createPersonaRepository(store: Store) {
     },
 
     getById(id: PersonaId): PersonaRow | null {
-      return selectById(databaseOf(store), id);
+      return selectById(readDatabaseOf(store), id);
     },
 
     /** Returns the updated row, or null when no persona has that id. */
@@ -99,7 +100,7 @@ export function createPersonaRepository(store: Store) {
     list(limit?: number): readonly PersonaRow[] {
       const bounded = assertLimit(limit);
       const rows = allRows<Record<string, unknown>>(
-        databaseOf(store).prepare(
+        readDatabaseOf(store).prepare(
           `SELECT ${COLUMNS} FROM personas ORDER BY created_at DESC LIMIT ?`,
         ),
         bounded,

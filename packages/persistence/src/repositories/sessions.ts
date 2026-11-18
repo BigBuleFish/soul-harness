@@ -9,7 +9,8 @@
 import type { AdapterId, JsonObject, PersonaId, SessionId } from '@soul-harness/contracts';
 
 import { allRows, oneRow, type StatementSource } from '../db/rows.js';
-import { databaseOf, type Store } from '../db/store.js';
+import { readDatabaseOf } from '../db/read.js';
+import type { Store } from '../db/store.js';
 import { camelizeRow } from '../mapping.js';
 import { withWrite } from '../tx/coordinator.js';
 import type { SessionRow } from '../types/rows.js';
@@ -78,7 +79,7 @@ export function createSessionRepository(store: Store) {
     },
 
     getById(id: SessionId): SessionRow | null {
-      return selectById(databaseOf(store), id);
+      return selectById(readDatabaseOf(store), id);
     },
 
     /** Looks up the still-open mapping for an adapter-side reference. */
@@ -88,7 +89,7 @@ export function createSessionRepository(store: Store) {
       readonly externalId: string;
     }): SessionRow | null {
       const raw = oneRow<Record<string, unknown>>(
-        databaseOf(store).prepare(
+        readDatabaseOf(store).prepare(
           `SELECT ${COLUMNS} FROM sessions
            WHERE persona_id = ? AND adapter_id = ? AND external_id = ? AND closed_at IS NULL
            LIMIT 1`,
@@ -113,7 +114,7 @@ export function createSessionRepository(store: Store) {
     listByPersona(personaId: PersonaId, limit?: number): readonly SessionRow[] {
       const bounded = assertLimit(limit);
       const rows = allRows<Record<string, unknown>>(
-        databaseOf(store).prepare(
+        readDatabaseOf(store).prepare(
           `SELECT ${COLUMNS} FROM sessions WHERE persona_id = ? ORDER BY opened_at DESC LIMIT ?`,
         ),
         personaId,
