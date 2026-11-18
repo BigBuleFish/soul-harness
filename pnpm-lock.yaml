@@ -39,6 +39,16 @@ importers:
         specifier: ^3.2.7
         version: 3.2.7(@types/node@24.19.2)
 
+  apps/soul-daemon:
+    dependencies:
+      '@soul-harness/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.2
+        version: 24.19.2
+
   packages/contracts:
     devDependencies:
       '@types/node':

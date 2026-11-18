@@ -11,12 +11,15 @@ DSH / Minecraft / QQ / CLI 都是**可选适配器**；不安装它们，Daemon 
 ## 当前状态
 
 **P0：架构冻结与工程规范。** 文档主体已完成；`packages/contracts` 已落地（SH-004）；
-Monorepo 根工程化已完成（SH-005）。仍无 Runtime。
+Monorepo 根工程化已完成（SH-005）。
+
+**P1 进行中。** `packages/persistence` 已完成（SH-006A–D）；`apps/soul-daemon` 的生命周期与
+装配层已完成（SH-007A）。**Runtime、API/WebSocket 仍未实现。**
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 主计划、ADR、信任边界、数据模型、生命周期、模块边界、身份协议、协作规范 | 文档主体已完成（SH-001 → SH-003.2）；**`packages/contracts` 已实现（SH-004）** |
-| P1 | Monorepo 骨架、Daemon 生命周期、Persistence、最小 API | **Monorepo 骨架已完成（SH-005）**；Daemon / Persistence / API 未开始 |
+| P1 | Monorepo 骨架、Daemon 生命周期、Persistence、最小 API | **Monorepo 骨架（SH-005）**、**Persistence（SH-006A–D）**、**Daemon 生命周期与装配（SH-007A）** 已完成；Runtime / API / WebSocket 未开始 |
 | P2+ | 事件接入、记忆网络、激活、自主认知、遗忘、睡眠梦境、外部适配 | 未开始 |
 
 目录和文档存在**不代表**功能完成。任何"已实现"必须以测试与验收记录为凭

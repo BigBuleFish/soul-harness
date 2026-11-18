@@ -1,0 +1,39 @@
+{
+  "name": "@soul-harness/soul-daemon",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Soul Harness daemon: application assembly, lifecycle, single-instance lock and persistence bootstrap. No cognitive logic, no transports yet.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
+  "main": "./dist/main.js",
+  "types": "./dist/main.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/main.d.ts",
+      "import": "./dist/main.js"
+    }
+  },
+  "bin": {
+    "soul-daemon": "./dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node src/main.ts",
+    "test": "vitest run",
+    "check": "tsc -p tsconfig.json --noEmit && vitest run"
+  },
+  "dependencies": {
+    "@soul-harness/persistence": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2"
+  }
+}
