@@ -61,8 +61,8 @@ withRead(store, (tx) => T): T
 | 单写者 | 单连接 + `BEGIN IMMEDIATE`；回调**同步**执行，JS 单线程下事务不可能被 `await` 打断 |
 | 异步回调 | 运行时检测 thenable → `async_callback_unsupported`（回滚），**不做半支持** |
 | 嵌套写 | 任何模式下的 `withWrite` 嵌套 → `nested_write` |
-| 读嵌套 | `withRead` 在外层事务内**加入**外层（不新开事务、不切 `query_only`） |
-| 只读强制 | `withRead` 期间 `PRAGMA query_only = ON`（连接层），且读接口只允许 prepare `SELECT/WITH/VALUES/EXPLAIN` |
+| 读嵌套 | `withRead` 在外层事务内**加入**外层（不新开事务、不提交），但叠加**深度计数**的只读守卫：最外层读作用域把 `query_only` 置 ON，全部退出后还原 |
+| 只读强制 | 只读作用域（含嵌套）期间 `PRAGMA query_only = ON`（连接层）；读接口另只允许 prepare `SELECT/WITH/VALUES/EXPLAIN` |
 | 事务控制权 | 回调**没有** `exec`，只有 `prepare()`；`BEGIN/COMMIT/END/ROLLBACK/SAVEPOINT/RELEASE/PRAGMA/ATTACH/DETACH/VACUUM` 一律 `statement_blocked` |
 | 语句生命周期 | 每次 `run/get/all` 与迭代器每次 `next()` 都检查事务是否仍 active；事务结束后 → `transaction_closed` |
 | 句柄形态 | `Tx`（`kind: 'write'`）与 `ReadTx`（`kind: 'read'`）是不同类型，不可互换 |
@@ -75,6 +75,12 @@ withRead(store, (tx) => T): T
 >
 > **SQL 能力闸门**不是子串黑名单：它取注释与空白之后的**首个关键字**判定（`firstKeyword()`），
 > 且依赖 `node:sqlite` 只准备第一条语句的行为（实测：`SELECT 1; SELECT 2` 只执行第一条）。
+> 关键字闸门只决定"能不能 prepare"，**不承担只读判定**——`WITH … INSERT/UPDATE/DELETE`
+> 首关键字是 `WITH`，会被闸门放行，但一定被 `query_only` 在 SQLite 执行层拒绝。
+>
+> **嵌套读作用域的只读性**：在外层写事务中开启 `query_only` 已在真实 SQLite 上验证——
+> 写入（含 `WITH …` 形式）被 SQLite 以 `read_only_violation` 拒绝，读取仍能看到未提交行，
+> 还原后外层事务可继续写入并正常提交。守卫按深度计数，连续/嵌套的多个读作用域互不干扰。
 
 ## 6. 字段映射
 
