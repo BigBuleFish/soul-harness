@@ -12,6 +12,10 @@
  * Before opening `gate-race` the test asserts that no racer has produced any
  * output and that the stale lock bytes are untouched — i.e. nobody has called
  * `acquireInstanceLock` yet.
+ *
+ * After the round the winner's lock file is snapshotted as a **Buffer** and
+ * compared byte-for-byte once every contender has been confirmed dead — not
+ * merely compared by JSON field, and not after a fixed delay.
  */
 
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -43,17 +47,50 @@ interface Contender {
 
 const children: ChildProcess[] = [];
 
-function killAll(): void {
-  while (children.length > 0) {
-    const child = children.pop() as ChildProcess;
-    if (child.exitCode === null) {
-      child.kill('SIGKILL');
+/**
+ * Sends SIGKILL and resolves on the child's `close` event (stdio drained, process
+ * gone). A child that already exited resolves immediately, so no event is missed.
+ */
+function terminate(child: ChildProcess): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
     }
+    // Registered synchronously with the check and the kill, so no event can slip
+    // through in between: JavaScript cannot deliver it mid-block.
+    child.once('close', () => resolve());
+    child.kill('SIGKILL');
+  });
+}
+
+function forget(child: ChildProcess): void {
+  const index = children.indexOf(child);
+  if (index >= 0) {
+    children.splice(index, 1);
   }
 }
 
-afterEach(() => {
-  killAll();
+/** Kills every tracked child and waits for all of them to be gone. */
+async function killAllAndWait(): Promise<void> {
+  const pending = children.splice(0, children.length);
+  await Promise.all(pending.map((child) => terminate(child)));
+}
+
+function isAlive(pid: number | undefined): boolean {
+  if (pid === undefined) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+afterEach(async () => {
+  await killAllAndWait();
 });
 
 beforeAll(() => {
@@ -76,10 +113,10 @@ function runContender(dataDir: string, gate: string): Contender {
   return { child, readyPath: join(dataDir, `ready-${gate}-${child.pid}`), output: () => output };
 }
 
-function stopContender(contender: Contender): void {
-  if (contender.child.exitCode === null) {
-    contender.child.kill('SIGKILL');
-  }
+/** Kills one contender and waits until the process is really gone. */
+async function stopAndWait(contender: Contender): Promise<void> {
+  await terminate(contender.child);
+  forget(contender.child);
 }
 
 async function waitFor(
@@ -97,7 +134,7 @@ async function waitFor(
 }
 
 /** Produces a genuinely stale lock: a real holder, then SIGKILL. */
-async function createStaleLock(dataDir: string): Promise<string> {
+async function createStaleLock(dataDir: string): Promise<Buffer> {
   const seed = runContender(dataDir, SEED_GATE);
 
   await waitFor(() => existsSync(seed.readyPath), 15_000, 'the seed holder to be ready');
@@ -111,12 +148,11 @@ async function createStaleLock(dataDir: string): Promise<string> {
     'the seed holder to acquire the lock',
   );
 
-  seed.child.kill('SIGKILL');
-  await new Promise<void>((resolve) => seed.child.once('close', () => resolve()));
+  await stopAndWait(seed);
 
   const lockPath = join(dataDir, LOCK_FILE_NAME);
   expect(existsSync(lockPath)).toBe(true);
-  return readFileSync(lockPath, 'utf8');
+  return readFileSync(lockPath);
 }
 
 describe('stale-lock takeover race', { timeout: 120_000 }, () => {
@@ -130,10 +166,13 @@ describe('stale-lock takeover race', { timeout: 120_000 }, () => {
         const staleBytes = await createStaleLock(dataDir);
         const lockPath = join(dataDir, LOCK_FILE_NAME);
         const raceGate = join(dataDir, RACE_GATE);
+        const staleToken = (JSON.parse(staleBytes.toString('utf8')) as { bootToken?: string })
+          .bootToken;
 
         const participants = Array.from({ length: contenders }, () =>
           runContender(dataDir, RACE_GATE),
         );
+        const pids = participants.map((participant) => participant.child.pid);
 
         // 1. Every racer is up and waiting on the race gate …
         await waitFor(
@@ -148,7 +187,7 @@ describe('stale-lock takeover race', { timeout: 120_000 }, () => {
         expect(participants.map((participant) => participant.output())).toStrictEqual(
           Array.from({ length: contenders }, () => ''),
         );
-        expect(readFileSync(lockPath, 'utf8')).toBe(staleBytes);
+        expect(readFileSync(lockPath).equals(staleBytes)).toBe(true);
 
         // 3. Now release all of them at once.
         writeFileSync(raceGate, 'go');
@@ -171,23 +210,25 @@ describe('stale-lock takeover race', { timeout: 120_000 }, () => {
           expect(['lock_held', 'lock_acquire_failed'], `round ${round}`).toContain(loser.code);
         }
 
-        // 4. The winner's lock is the one on disk, and it is not the stale one.
-        const onDisk = JSON.parse(readFileSync(lockPath, 'utf8')) as { bootToken?: string };
-        expect(onDisk.bootToken).toBe(winners[0]?.token);
-        expect(onDisk.bootToken).not.toBe(
-          (JSON.parse(staleBytes) as { bootToken?: string }).bootToken,
-        );
+        // 4. Snapshot the winner's lock **as raw bytes** while it is held.
+        const heldBytes = readFileSync(lockPath);
+        const heldToken = (JSON.parse(heldBytes.toString('utf8')) as { bootToken?: string })
+          .bootToken;
+        expect(heldToken).toBe(winners[0]?.token);
+        expect(heldToken).not.toBe(staleToken);
 
-        // 5. Losers exit without disturbing the winner's lock.
-        for (const participant of participants) {
-          stopContender(participant);
+        // 5. Kill every contender (winner included) and wait for real exits.
+        await Promise.all(participants.map((participant) => stopAndWait(participant)));
+        for (const pid of pids) {
+          expect(isAlive(pid), `contender ${pid ?? 'unknown'} is still running`).toBe(false);
         }
-        await new Promise((resolve) => setTimeout(resolve, 100));
 
-        const after = JSON.parse(readFileSync(lockPath, 'utf8')) as { bootToken?: string };
-        expect(after.bootToken).toBe(winners[0]?.token);
+        // 6. Full-byte comparison after every contender is gone: nothing removed
+        //    or rewrote the winner's lock.
+        const afterExitBytes = readFileSync(lockPath);
+        expect(afterExitBytes.equals(heldBytes)).toBe(true);
       } finally {
-        killAll();
+        await killAllAndWait();
         removeTempDir(dataDir);
       }
     }
@@ -210,7 +251,7 @@ describe('stale-lock takeover race', { timeout: 120_000 }, () => {
         'the first contender to win',
       );
       const winner = JSON.parse(first.output().trim()) as ContenderResult;
-      const heldBytes = readFileSync(lockPath, 'utf8');
+      const heldBytes = readFileSync(lockPath);
 
       // The race gate already exists, so this contender proceeds immediately.
       const second = runContender(dataDir, RACE_GATE);
@@ -224,11 +265,17 @@ describe('stale-lock takeover race', { timeout: 120_000 }, () => {
       expect(result.ok).toBe(false);
       expect(result.code).toBe('lock_held');
 
-      expect(readFileSync(lockPath, 'utf8')).toBe(heldBytes);
-      const onDisk = JSON.parse(heldBytes) as { bootToken?: string };
-      expect(onDisk.bootToken).toBe(winner.token);
+      // Byte-for-byte: the refused contender changed nothing.
+      expect(readFileSync(lockPath).equals(heldBytes)).toBe(true);
+      const onDiskToken = (JSON.parse(heldBytes.toString('utf8')) as { bootToken?: string })
+        .bootToken;
+      expect(onDiskToken).toBe(winner.token);
+
+      await stopAndWait(second);
+      expect(isAlive(second.child.pid), 'the refused contender is still running').toBe(false);
+      expect(readFileSync(lockPath).equals(heldBytes)).toBe(true);
     } finally {
-      killAll();
+      await killAllAndWait();
       removeTempDir(dataDir);
     }
   });
