@@ -13,9 +13,13 @@
  * output and that the stale lock bytes are untouched — i.e. nobody has called
  * `acquireInstanceLock` yet.
  *
+ * Exit synchronisation: every child gets a `close` promise **at spawn time**, and
+ * every path (kill, already-exited, spawn failure, afterEach, finally) awaits that
+ * same promise. `exitCode` only proves the process exited; it does not prove the
+ * stdio streams are drained, so it is never used as a substitute for `close`.
+ *
  * After the round the winner's lock file is snapshotted as a **Buffer** and
- * compared byte-for-byte once every contender has been confirmed dead — not
- * merely compared by JSON field, and not after a fixed delay.
+ * compared byte-for-byte once every contender's `close` has fired.
  */
 
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -32,6 +36,9 @@ const LOCK_CONTENDER = join(import.meta.dirname, 'fixtures', 'lock-contender.mjs
 const SEED_GATE = 'gate-seed';
 const RACE_GATE = 'gate-race';
 
+/** A child that never emits `close` is a bug, not something to wait out forever. */
+const CLOSE_TIMEOUT_MS = 30_000;
+
 interface ContenderResult {
   readonly ok: boolean;
   readonly token?: string;
@@ -42,39 +49,84 @@ interface ContenderResult {
 interface Contender {
   readonly child: ChildProcess;
   readonly readyPath: string;
+  /** Resolves once the child emitted `close` (or failed to spawn). Created once. */
+  readonly closed: Promise<void>;
   output(): string;
 }
 
-const children: ChildProcess[] = [];
+const contenders: Contender[] = [];
 
 /**
- * Sends SIGKILL and resolves on the child's `close` event (stdio drained, process
- * gone). A child that already exited resolves immediately, so no event is missed.
+ * Watches a child from the moment it is spawned.
+ *
+ * `close` fires after the stdio streams are drained, which is exactly what the
+ * cleanup needs; `error` covers a spawn failure, where `close` may never arrive.
+ * The promise is created once and reused by every code path.
  */
-function terminate(child: ChildProcess): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve();
-      return;
-    }
-    // Registered synchronously with the check and the kill, so no event can slip
-    // through in between: JavaScript cannot deliver it mid-block.
-    child.once('close', () => resolve());
-    child.kill('SIGKILL');
+function watchClose(child: ChildProcess): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+
+    const finish = (error?: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (error === undefined) {
+        resolve();
+      } else {
+        reject(error);
+      }
+    };
+
+    const timer = setTimeout(() => {
+      finish(
+        new Error(`child ${String(child.pid)} did not emit "close" within ${CLOSE_TIMEOUT_MS} ms`),
+      );
+    }, CLOSE_TIMEOUT_MS);
+    // The watchdog must not keep the test process alive on its own.
+    timer.unref();
+
+    child.once('close', () => finish());
+    child.once('error', (error) => finish(error));
   });
 }
 
-function forget(child: ChildProcess): void {
-  const index = children.indexOf(child);
+function forget(contender: Contender): void {
+  const index = contenders.indexOf(contender);
   if (index >= 0) {
-    children.splice(index, 1);
+    contenders.splice(index, 1);
   }
 }
 
-/** Kills every tracked child and waits for all of them to be gone. */
+/**
+ * Terminates a contender and waits for its `close`.
+ *
+ * SIGKILL is only sent while the child is still running, but `close` is awaited
+ * in every case — including a child that exited earlier and one that failed to
+ * spawn (`exitCode` is never treated as proof that stdio is closed).
+ */
+async function terminate(contender: Contender): Promise<void> {
+  const { child } = contender;
+
+  if (child.exitCode === null && child.signalCode === null && child.pid !== undefined) {
+    child.kill('SIGKILL');
+  }
+
+  await contender.closed;
+}
+
+/** Terminates one contender, waits for `close`, and stops tracking it. */
+async function stopAndWait(contender: Contender): Promise<void> {
+  await terminate(contender);
+  forget(contender);
+}
+
+/** Kills every tracked contender and waits for all of their `close` events. */
 async function killAllAndWait(): Promise<void> {
-  const pending = children.splice(0, children.length);
-  await Promise.all(pending.map((child) => terminate(child)));
+  const pending = contenders.splice(0, contenders.length);
+  await Promise.all(pending.map((contender) => terminate(contender)));
 }
 
 function isAlive(pid: number | undefined): boolean {
@@ -86,6 +138,27 @@ function isAlive(pid: number | undefined): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Extra assertion on top of `close`: the PID must disappear from the process table.
+ *
+ * `close` is what proves the exit; on Windows the OS may still answer
+ * `OpenProcess` for a just-terminated process for a short moment, so the probe is
+ * retried against a bound instead of being read once (which made the assertion
+ * flaky without making it stronger).
+ */
+async function waitUntilPidGone(pid: number | undefined, timeoutMs = 5_000): Promise<void> {
+  if (pid === undefined) {
+    return;
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (isAlive(pid)) {
+    if (Date.now() > deadline) {
+      throw new Error(`process ${pid} is still visible ${timeoutMs} ms after its close event`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
 
@@ -102,7 +175,12 @@ function runContender(dataDir: string, gate: string): Contender {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  children.push(child);
+
+  // Registered immediately: from here on, every path can await the same promise.
+  const closed = watchClose(child);
+  // A reject only surfaces on a spawn failure; mark it handled so a test that has
+  // not reached its cleanup yet cannot trip an unhandled-rejection crash.
+  closed.catch(() => undefined);
 
   let output = '';
   child.stdout?.setEncoding('utf8');
@@ -110,13 +188,15 @@ function runContender(dataDir: string, gate: string): Contender {
     output += chunk;
   });
 
-  return { child, readyPath: join(dataDir, `ready-${gate}-${child.pid}`), output: () => output };
-}
+  const contender: Contender = {
+    child,
+    readyPath: join(dataDir, `ready-${gate}-${child.pid}`),
+    closed,
+    output: () => output,
+  };
+  contenders.push(contender);
 
-/** Kills one contender and waits until the process is really gone. */
-async function stopAndWait(contender: Contender): Promise<void> {
-  await terminate(contender.child);
-  forget(contender.child);
+  return contender;
 }
 
 async function waitFor(
@@ -158,7 +238,7 @@ async function createStaleLock(dataDir: string): Promise<Buffer> {
 describe('stale-lock takeover race', { timeout: 120_000 }, () => {
   it('lets exactly one of several real processes win, repeatedly', async () => {
     const rounds = 5;
-    const contenders = 4;
+    const racers = 4;
 
     for (let round = 0; round < rounds; round += 1) {
       const dataDir = makeTempDir('sh-race-');
@@ -169,23 +249,21 @@ describe('stale-lock takeover race', { timeout: 120_000 }, () => {
         const staleToken = (JSON.parse(staleBytes.toString('utf8')) as { bootToken?: string })
           .bootToken;
 
-        const participants = Array.from({ length: contenders }, () =>
-          runContender(dataDir, RACE_GATE),
-        );
+        const participants = Array.from({ length: racers }, () => runContender(dataDir, RACE_GATE));
         const pids = participants.map((participant) => participant.child.pid);
 
         // 1. Every racer is up and waiting on the race gate …
         await waitFor(
           () => participants.every((participant) => existsSync(participant.readyPath)),
           15_000,
-          `all ${contenders} contenders to be ready (round ${round})`,
+          `all ${racers} contenders to be ready (round ${round})`,
         );
 
         // 2. … the gate is still closed, nobody has produced a result, and the
         //    stale lock is byte-identical: no contender reached the lock yet.
         expect(existsSync(raceGate)).toBe(false);
         expect(participants.map((participant) => participant.output())).toStrictEqual(
-          Array.from({ length: contenders }, () => ''),
+          Array.from({ length: racers }, () => ''),
         );
         expect(readFileSync(lockPath).equals(staleBytes)).toBe(true);
 
@@ -217,13 +295,11 @@ describe('stale-lock takeover race', { timeout: 120_000 }, () => {
         expect(heldToken).toBe(winners[0]?.token);
         expect(heldToken).not.toBe(staleToken);
 
-        // 5. Kill every contender (winner included) and wait for real exits.
+        // 5. Kill every contender (winner included) and wait for real `close`.
         await Promise.all(participants.map((participant) => stopAndWait(participant)));
-        for (const pid of pids) {
-          expect(isAlive(pid), `contender ${pid ?? 'unknown'} is still running`).toBe(false);
-        }
+        await Promise.all(pids.map((pid) => waitUntilPidGone(pid)));
 
-        // 6. Full-byte comparison after every contender is gone: nothing removed
+        // 6. Full-byte comparison after every contender is closed: nothing removed
         //    or rewrote the winner's lock.
         const afterExitBytes = readFileSync(lockPath);
         expect(afterExitBytes.equals(heldBytes)).toBe(true);
@@ -272,7 +348,7 @@ describe('stale-lock takeover race', { timeout: 120_000 }, () => {
       expect(onDiskToken).toBe(winner.token);
 
       await stopAndWait(second);
-      expect(isAlive(second.child.pid), 'the refused contender is still running').toBe(false);
+      await waitUntilPidGone(second.child.pid);
       expect(readFileSync(lockPath).equals(heldBytes)).toBe(true);
     } finally {
       await killAllAndWait();
