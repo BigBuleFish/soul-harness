@@ -39,6 +39,11 @@ export const PERSISTENCE_ERROR_CODES = [
   'invalid_column_value',
   'invalid_json_column',
   'invalid_argument',
+  // checkpoint
+  'checkpoint_invalid',
+  'checkpoint_version_unsupported',
+  'checkpoint_epoch_mismatch',
+  'runtime_state_missing',
 ] as const;
 
 export type PersistenceErrorCode = (typeof PERSISTENCE_ERROR_CODES)[number];

@@ -1,8 +1,8 @@
 # `@soul-harness/persistence` — 持久化基础
 
 - **地位**：P1 唯一的 SQLite 访问层。任何模块都不得自行打开数据库文件、转换字段名或直接写表。
-- **状态**：**批次 A（数据库基础与 Migration）+ 批次 B（事务、字段映射、六表 Repository）已完成**。
-  检查点保存/读取属批次 C，尚未提供。
+- **状态**：**批次 A（数据库基础与 Migration）+ 批次 B（事务、字段映射、六表 Repository）+
+  批次 C（检查点读写与恢复读取）已完成**。恢复 Runtime 对象、认知状态重建与生命周期编排属后续阶段。
 - **上位文档**：[DATA-MODEL](docs/architecture/DATA-MODEL.md) §1/§3/§6/§8、[MODULES](docs/architecture/MODULES.md) §2–§3、
   [RUNTIME-LIFECYCLE](docs/architecture/RUNTIME-LIFECYCLE.md) §2/§9、[TRUST-BOUNDARIES](docs/architecture/TRUST-BOUNDARIES.md) §5.1/§11.3。
 
@@ -17,6 +17,7 @@
 | 事务 | `withWrite` / `withRead`；单写者、同步回调、嵌套拒绝、句柄失效保护 |
 | 字段映射 | snake↔camel 纯机械转换；JSON 列带 schema 标识；布尔 0/1 |
 | Repository | 六张 P1 表的基础 CRUD；错误分类；分页上限 |
+| 检查点 | 版本化 envelope 的保存/读取；epoch 校验；损坏与不支持版本的明确判定 |
 
 ## 2. 不负责什么
 
@@ -25,7 +26,7 @@
 3. **不暴露裸句柄**：`DatabaseSync` 不在包入口；事务回调只拿到有生命周期的 `Tx`。
 4. **不做进程级单实例锁**：属 Daemon（RUNTIME §9 第 4 步）。
 5. **不保存正文**：P1 六表无任何正文字段。
-6. **不实现检查点**：`runtime_state.checkpoint_json` 由批次 C 的专用接口负责；upsert 不会触碰该列。
+6. **不实现检查点语义**：只按 envelope 存取 `runtime_state.checkpoint_json`；不决定何时保存、不根据它重建 Runtime。
 
 ## 3. 目录
 
@@ -37,11 +38,12 @@ packages/persistence/
 │  ├─ errors.ts                    # PersistenceError + 受控错误码
 │  ├─ mapping.ts                   # snake↔camel、JSON 列、布尔
 │  ├─ db/{open-store,store,pragmas,rows,classify}.ts
-│  ├─ tx/coordinator.ts            # withWrite / withRead
+│  ├─ tx/{coordinator,statements,read-guard-fault}.ts
+│  ├─ checkpoint/format.ts        # 版本化 envelope 的编码/校验
 │  ├─ migrations/{types,expected-schema,load,migrator}.ts
-│  ├─ repositories/{personas,sessions,events,tasks,runtime-state,schema-migrations,shared,index}.ts
+│  ├─ repositories/{personas,sessions,events,tasks,runtime-state,checkpoint,schema-migrations,shared,index}.ts
 │  └─ types/rows.ts                # camelCase 行类型（复用 contracts 品牌 ID）
-└─ test/                           # 100 项，真实 SQLite 文件
+└─ test/                           # 210 项，真实 SQLite 文件
 ```
 
 ## 4. 依赖
@@ -114,6 +116,7 @@ withRead(store, (tx) => T): T
 | `events` | `insert`（archive 三列不可设；`summary` 只接受 NULL；`adapterEventRef` 强制格式）/ `getById` / `findByDedupeKey` / `updateStatus` / `listByPersonaStatus` |
 | `tasks` | `insert` / `getById` / `updateState` / `listByPersonaState` |
 | `runtime_state` | `upsert`（不触碰 checkpoint）/ `get` |
+| `checkpoints` | `load` / `save`（见 §7.1；**无 clear**） |
 | `schema_migrations` | **只读**：`listApplied` / `getLatest` |
 
 - 所有写入都经过 `withWrite`；Repository 不持有连接、不暴露 `DatabaseSync`。
@@ -129,6 +132,45 @@ withRead(store, (tx) => T): T
 | `adapterEventRef` 必须匹配 `^[A-Za-z0-9._:-]{1,64}$` | 复用 contracts 的 `isAdapterEventRef`；空串、超长、空白、换行、中文、非法字符 → `invalid_identifier`；**不 trim、不修复**；去重键行为不变 |
 
 > 未追加数据库层 CHECK（会需要重建表）；当前由写入边界强制，`0001_init_core.sql` 保持原样。
+
+### 7.1 检查点（SH-006C）
+
+```ts
+const result = checkpoints.load(personaId);   // 'absent' | 'present' | 'stale'
+const stored = checkpoints.save({ personaId, epoch, refs?, updatedAt });
+```
+
+**存储格式**（`runtime_state.checkpoint_json`，DATA-MODEL §3.1 只允许游标/队列位置/版本号/活跃 ID 列表）：
+
+```json
+{
+  "schema": "soul.runtime.checkpoint.v1",
+  "version": 1,
+  "epoch": 3,
+  "refs": { "cursor": "sched:0:17", "threadIds": ["thr_…"], "runIds": ["run_…"] }
+}
+```
+
+| 规则 | 行为 |
+|---|---|
+| `schema` | 必须是 `soul.runtime.checkpoint.v1`，否则 `checkpoint_version_unsupported` |
+| `version` | 必须是 `1`；其他值（含字符串）→ `checkpoint_version_unsupported` / `checkpoint_invalid` |
+| `epoch` | 非负整数；`save` 时**必须等于** `runtime_state.epoch`，否则 `checkpoint_epoch_mismatch` |
+| `refs` | 可选；只允许 `cursor`（`^[A-Za-z0-9._:-]{1,128}$`）、`threadIds`、`runIds`（contracts 品牌 ID，各 ≤256） |
+| 未知字段 | 一律拒绝（`checkpoint_invalid`）——防止未来写入方夹带正文 |
+| 大小上限 | 64 KiB |
+| 缺失 / 损坏 | 缺失 → `absent`；非法 JSON、缺字段、类型错误、超限 → `checkpoint_invalid`（**不得当作空检查点**） |
+| 过期 | envelope `epoch` < 行 `epoch` → 返回 `stale`，**不删除**（丢弃是恢复流程的决定，见 RUNTIME-LIFECYCLE §4） |
+| 超前 | envelope `epoch` > 行 `epoch` → `checkpoint_epoch_mismatch` |
+| 无运行状态行 | `save` → `runtime_state_missing`；`load` → `absent` |
+
+**事务与所有权**：
+
+- `save` 在 `withWrite` 内执行单条 `UPDATE`（原子、失败回滚、旧检查点不变）；载荷在**开启事务前**校验。
+- `load` 在 `withRead` 内执行，加入外层事务时能读到未提交的检查点。
+- `runtime_state.upsert` 不写 `checkpoint_json`；`checkpoints.save` 只写 `checkpoint_json` 与 `updated_at`，两边互不覆盖。
+- 嵌套调用仍受 SH-006B 约束：`save` 在外层事务内 → `nested_write`；Store unusable → `store_unusable`。
+- **不提供 `clear()`**：架构只定义了恢复时"丢弃"过期检查点，没有授权删除已存检查点的接口。
 
 ## 8. Migration 机制
 
@@ -150,4 +192,6 @@ withRead(store, (tx) => T): T
 2. `verifySchema()` 只覆盖 P1 六表；新增迁移必须同步更新 `expected-schema.ts`。
 3. 行类型里的 ID 使用 contracts 品牌类型，但**读取不再校验格式**：数据库是存储，不是鉴权边界。
 4. `PersonaState` / `TaskState` 目前定义在本包（contracts 未提供）；迁入 contracts 属后续契约变更。
-5. 检查点（批次 C）、单实例锁与 WAL checkpoint on close（Daemon）尚未实现。
+5. 单实例锁与 WAL checkpoint on close（Daemon）尚未实现。
+6. 检查点只提供 envelope 存取：**业务载荷（调度器的具体游标语义、活跃思维集合的判定）由后续 Runtime 批次定义**；本包不解释 `refs` 的含义，只校验形状。
+7. 检查点保存是**独立事务**：SH-006B 规定事务回调必须同步且禁止嵌套写，因此运行期无法把 checkpoint 保存并入更大的事务；若未来需要，属于事务契约变更。

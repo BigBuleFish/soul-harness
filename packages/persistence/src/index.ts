@@ -59,6 +59,7 @@ export {
 
 export {
   createRepositories,
+  createCheckpointRepository,
   createEventRepository,
   createPersonaRepository,
   createRuntimeStateRepository,
@@ -70,6 +71,8 @@ export {
   MAX_LIST_LIMIT,
 } from './repositories/index.js';
 export type {
+  CheckpointLoadResult,
+  CheckpointRepository,
   EventRepository,
   InsertEventInput,
   InsertPersonaInput,
@@ -78,8 +81,10 @@ export type {
   PersonaRepository,
   Repositories,
   RuntimeStateRepository,
+  SaveCheckpointInput,
   SchemaMigrationsRepository,
   SessionRepository,
+  StoredCheckpoint,
   TaskRepository,
   UpdateEventStatusInput,
   UpdatePersonaStateInput,
@@ -87,6 +92,17 @@ export type {
   UpsertRuntimeStateInput,
   CloseSessionInput,
 } from './repositories/index.js';
+
+export {
+  CHECKPOINT_CURSOR_PATTERN,
+  CHECKPOINT_MAX_BYTES,
+  CHECKPOINT_MAX_REFS,
+  CHECKPOINT_SCHEMA,
+  CHECKPOINT_VERSION,
+  decodeCheckpoint,
+  encodeCheckpoint,
+} from './checkpoint/format.js';
+export type { Checkpoint, CheckpointRefs } from './checkpoint/format.js';
 
 export { PERSONA_STATES, TASK_STATES } from './types/rows.js';
 export type {

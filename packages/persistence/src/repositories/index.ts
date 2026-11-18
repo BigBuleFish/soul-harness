@@ -7,12 +7,21 @@
  */
 
 import type { Store } from '../db/store.js';
+import { createCheckpointRepository } from './checkpoint.js';
 import { createEventRepository } from './events.js';
 import { createPersonaRepository } from './personas.js';
 import { createRuntimeStateRepository } from './runtime-state.js';
 import { createSchemaMigrationsRepository } from './schema-migrations.js';
 import { createSessionRepository } from './sessions.js';
 import { createTaskRepository } from './tasks.js';
+
+export { createCheckpointRepository } from './checkpoint.js';
+export type {
+  CheckpointLoadResult,
+  CheckpointRepository,
+  SaveCheckpointInput,
+  StoredCheckpoint,
+} from './checkpoint.js';
 
 export { createPersonaRepository } from './personas.js';
 export type { InsertPersonaInput, PersonaRepository, UpdatePersonaStateInput } from './personas.js';
@@ -41,6 +50,7 @@ export function createRepositories(store: Store) {
     events: createEventRepository(store),
     tasks: createTaskRepository(store),
     runtimeState: createRuntimeStateRepository(store),
+    checkpoints: createCheckpointRepository(store),
     schemaMigrations: createSchemaMigrationsRepository(store),
   };
 }
