@@ -67,6 +67,7 @@ withRead(store, (tx) => T): T
 | 语句生命周期 | 每次 `run/get/all` 与迭代器每次 `next()` 都检查事务是否仍 active；事务结束后 → `transaction_closed` |
 | 句柄形态 | `Tx`（`kind: 'write'`）与 `ReadTx`（`kind: 'read'`）是不同类型，不可互换 |
 | 清理失败 | 读守卫恢复失败 → Store 标记 `store_unusable`；若回调本身成功，**调用整体失败**并抛出 `store_unusable`，绝不返回正常结果 |
+| 事务失效 | Store 一旦 unusable，**当前活动事务同步失效**：新 `prepare` 抛 `store_unusable`，此前已 prepare 的语句抛 `transaction_closed`，`withWrite` 拒绝 COMMIT 并回滚 |
 | 错误保真 | 非 SQLite 错误原样抛出（identity 不变）；SQLite 错误分类后带 `cause` |
 | 关闭后 | `store_closed`，不会静默重开 |
 
@@ -86,7 +87,10 @@ withRead(store, (tx) => T): T
 > ① Store 立即标记为不可用，后续 `withRead`/`withWrite` 一律 `store_unusable`；
 > ② 若回调正常返回，`withRead` 抛出 `store_unusable` 而不是返回结果；
 > ③ 若回调已经抛错，**原始错误保持 identity 不被覆盖**，清理失败作为后续拒绝时的 `cause` 记录
-> （消息只描述操作，不含 SQL 或路径）。
+> （消息只描述操作，不含 SQL 或路径）；
+> ④ **正在运行的事务一并失效**：即使外层 `withWrite` 的回调捕获了内层错误并正常返回，
+> 该事务也永不被提交——协调器在 COMMIT 前检查 Store 状态，改为 ROLLBACK 并抛出
+> `store_unusable`；回调期间的新语句与已 prepare 的语句同样被拒绝。
 
 ## 6. 字段映射
 

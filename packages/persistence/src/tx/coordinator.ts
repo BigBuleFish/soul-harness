@@ -97,8 +97,13 @@ function assertUsable(store: Store): void {
     return;
   }
 
+  throw unusableError(store);
+}
+
+/** Stable failure used whenever work is attempted on a poisoned store. */
+function unusableError(store: Store): PersistenceError {
   const reason = unusableReasons.get(store);
-  throw new PersistenceError(
+  return new PersistenceError(
     'store_unusable',
     'store is unusable after a failed transaction cleanup; reopen it',
     reason === undefined ? undefined : { cause: reason },
@@ -122,10 +127,26 @@ function assertSynchronous<T>(result: T, operation: string): T {
   return result;
 }
 
-function handleFor(db: DatabaseSync, mode: 'write' | 'read', isActive: () => boolean): Tx | ReadTx {
+/**
+ * Builds the transaction handle.
+ *
+ * A poisoned store invalidates the *current* transaction too: `prepare` refuses
+ * with `store_unusable`, and statements captured earlier stop executing because
+ * liveness now also requires the store to be usable. Callbacks therefore cannot
+ * keep writing after a nested cleanup failure, even when they swallow the error.
+ */
+function handleFor(
+  store: Store,
+  db: DatabaseSync,
+  mode: 'write' | 'read',
+  isActive: () => boolean,
+): Tx | ReadTx {
   const factory = (sql: string): RawStatement => db.prepare(sql);
-  const prepare = (sql: string): GuardedStatement =>
-    createGuardedStatement(sql, mode, isActive, factory);
+  const isLive = (): boolean => isActive() && !unusable.has(store);
+  const prepare = (sql: string): GuardedStatement => {
+    assertUsable(store);
+    return createGuardedStatement(sql, mode, isLive, factory);
+  };
 
   return mode === 'write' ? { kind: 'write', prepare } : { kind: 'read', prepare };
 }
@@ -240,7 +261,7 @@ export function withWrite<T>(store: Store, fn: (tx: Tx) => T): NotPromise<T> {
   }
 
   state.mode = 'write';
-  const tx = handleFor(db, 'write', () => state.mode === 'write') as Tx;
+  const tx = handleFor(store, db, 'write', () => state.mode === 'write') as Tx;
 
   try {
     db.exec('BEGIN IMMEDIATE');
@@ -251,6 +272,14 @@ export function withWrite<T>(store: Store, fn: (tx: Tx) => T): NotPromise<T> {
 
   try {
     const result = assertSynchronous(fn(tx), 'write transaction');
+
+    // The callback may have swallowed a nested cleanup failure. The transaction
+    // is no longer trustworthy, so it is never committed: throwing here routes
+    // through the rollback path below.
+    if (unusable.has(store)) {
+      throw unusableError(store);
+    }
+
     db.exec('COMMIT');
     return result as NotPromise<T>;
   } catch (error) {
@@ -299,7 +328,7 @@ export function withRead<T>(store: Store, fn: (tx: ReadTx) => T): NotPromise<T> 
   }
 
   const isActive = (): boolean => (joined ? state.mode !== 'idle' : state.mode === 'read');
-  const tx = handleFor(db, 'read', isActive) as ReadTx;
+  const tx = handleFor(store, db, 'read', isActive) as ReadTx;
 
   let result: T | undefined;
   let failure: { readonly error: unknown } | null = null;
