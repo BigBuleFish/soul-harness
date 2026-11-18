@@ -1,13 +1,14 @@
 /**
  * Test fixture: one contender in the stale-lock race.
  *
- * Flow (a real barrier, so the contenders truly compete at the same instant):
- *   1. write `<dataDir>/ready-<pid>` so the parent knows every process is up;
- *   2. spin until `<dataDir>/go` exists;
- *   3. call the real `acquireInstanceLock` and print one JSON line;
+ * Flow (a real barrier, so the contender cannot touch the lock before the gate):
+ *   1. write `<dataDir>/ready-<gate>-<pid>` so the parent knows this process is up;
+ *   2. spin until `<dataDir>/<gate>` exists — the gate is **per phase**, so the
+ *      seed phase and the race phase never share one file;
+ *   3. call the real `acquireInstanceLock` and print exactly one JSON line;
  *   4. on success, keep the lock (the parent inspects the file) until killed.
  *
- * Usage: node lock-contender.mjs <dataDir>
+ * Usage: node lock-contender.mjs <dataDir> <gateName>
  */
 
 /* global setInterval */
@@ -18,15 +19,16 @@ import { join } from 'node:path';
 import { acquireInstanceLock } from '../../dist/lock.js';
 
 const dataDir = process.argv[2];
+const gate = process.argv[3];
 
-if (dataDir === undefined) {
-  throw new Error('dataDir argument is required');
+if (dataDir === undefined || gate === undefined) {
+  throw new Error('usage: lock-contender.mjs <dataDir> <gateName>');
 }
 
-writeFileSync(join(dataDir, `ready-${process.pid}`), 'ready');
+writeFileSync(join(dataDir, `ready-${gate}-${process.pid}`), 'ready');
 
-while (!existsSync(join(dataDir, 'go'))) {
-  // Busy-wait on the barrier; the parent creates it once every pid is ready.
+while (!existsSync(join(dataDir, gate))) {
+  // Busy-wait on the barrier; the parent creates the gate once every pid is ready.
 }
 
 try {
