@@ -16,6 +16,11 @@
  *     enables the connection-level `query_only` guard for its duration, so a
  *     write is rejected by SQLite itself rather than by SQL inspection.
  *
+ * Cleanup semantics: if the read guard cannot be restored, the connection state
+ * is unknown. The store is marked unusable and the failure is reported to the
+ * caller — unless the callback already threw, in which case that error keeps its
+ * identity and the cleanup failure becomes the recorded reason for `store_unusable`.
+ *
  * Nesting rules:
  *   - `withWrite` inside `withWrite` / `withRead` → `nested_write`
  *   - `withRead` inside `withWrite` / `withRead`  → joins the outer transaction,
@@ -27,6 +32,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { classifyDatabaseError } from '../db/classify.js';
 import { databaseOf, type Store } from '../db/store.js';
 import { PersistenceError } from '../errors.js';
+import { takeReadGuardFault } from './read-guard-fault.js';
 import { createGuardedStatement, type GuardedStatement, type RawStatement } from './statements.js';
 
 /** Write transaction handle: prepare only, no transaction control. */
@@ -62,6 +68,9 @@ const states = new WeakMap<Store, CoordinatorState>();
  */
 const unusable = new WeakSet<Store>();
 
+/** Why a store became unusable; attached as `cause` to later rejections. */
+const unusableReasons = new WeakMap<Store, PersistenceError>();
+
 /** True when a previous cleanup failure left the store in an unsafe state. */
 export function isStoreUnusable(store: Store): boolean {
   return unusable.has(store);
@@ -76,13 +85,24 @@ function stateOf(store: Store): CoordinatorState {
   return state;
 }
 
-function assertUsable(store: Store): void {
-  if (unusable.has(store)) {
-    throw new PersistenceError(
-      'store_unusable',
-      'store is unusable after a failed transaction cleanup; reopen it',
-    );
+function markUnusable(store: Store, reason: PersistenceError): void {
+  if (!unusable.has(store)) {
+    unusableReasons.set(store, reason);
   }
+  unusable.add(store);
+}
+
+function assertUsable(store: Store): void {
+  if (!unusable.has(store)) {
+    return;
+  }
+
+  const reason = unusableReasons.get(store);
+  throw new PersistenceError(
+    'store_unusable',
+    'store is unusable after a failed transaction cleanup; reopen it',
+    reason === undefined ? undefined : { cause: reason },
+  );
 }
 
 function isThenable(value: unknown): boolean {
@@ -114,12 +134,14 @@ function readQueryOnly(db: DatabaseSync, store: Store): 0 | 1 {
   try {
     const row = db.prepare('PRAGMA query_only').get() as { query_only?: unknown } | undefined;
     return row?.query_only === 1 ? 1 : 0;
-  } catch {
-    unusable.add(store);
-    throw new PersistenceError(
+  } catch (error) {
+    const reason = new PersistenceError(
       'store_unusable',
       'cannot read the query_only pragma; connection state is unknown',
+      { cause: error, details: { operation: 'read guard' } },
     );
+    markUnusable(store, reason);
+    throw reason;
   }
 }
 
@@ -140,10 +162,19 @@ function beginReadGuard(store: Store, db: DatabaseSync): void {
     const previous = readQueryOnly(db, store);
 
     try {
+      const fault = takeReadGuardFault('enable');
+      if (fault !== null) {
+        throw fault;
+      }
       db.exec('PRAGMA query_only = ON');
     } catch (error) {
-      unusable.add(store);
-      throw classifyDatabaseError(error, 'enable read-only guard');
+      const reason = new PersistenceError(
+        'store_unusable',
+        'failed to enable the read-only guard; connection state is unknown',
+        { cause: error, details: { operation: 'enable read guard' } },
+      );
+      markUnusable(store, reason);
+      throw reason;
     }
 
     state.queryOnlyBefore = previous;
@@ -155,25 +186,37 @@ function beginReadGuard(store: Store, db: DatabaseSync): void {
 /**
  * Releases one read scope and restores the pragma when the outermost one closes.
  *
- * A restore failure poisons the store: it must never be reported as success, and
- * it must never replace the error already propagating out of the transaction.
+ * Returns the cleanup failure instead of throwing: the caller decides whether it
+ * becomes the outcome (callback succeeded → report it) or stays diagnostic
+ * (callback already failed → keep that error). Either way the store is poisoned.
  */
-function endReadGuard(store: Store, db: DatabaseSync): void {
+function endReadGuard(store: Store, db: DatabaseSync): PersistenceError | null {
   const state = stateOf(store);
 
   if (state.readOnlyDepth === 0) {
-    return;
+    return null;
   }
 
   state.readOnlyDepth -= 1;
   if (state.readOnlyDepth > 0) {
-    return;
+    return null;
   }
 
   try {
+    const fault = takeReadGuardFault('restore');
+    if (fault !== null) {
+      throw fault;
+    }
     db.exec(`PRAGMA query_only = ${state.queryOnlyBefore === 1 ? 'ON' : 'OFF'}`);
-  } catch {
-    unusable.add(store);
+    return null;
+  } catch (error) {
+    const reason = new PersistenceError(
+      'store_unusable',
+      'failed to restore the read-only guard; connection state is unknown',
+      { cause: error, details: { operation: 'restore read guard' } },
+    );
+    markUnusable(store, reason);
+    return reason;
   }
 }
 
@@ -258,19 +301,21 @@ export function withRead<T>(store: Store, fn: (tx: ReadTx) => T): NotPromise<T> 
   const isActive = (): boolean => (joined ? state.mode !== 'idle' : state.mode === 'read');
   const tx = handleFor(db, 'read', isActive) as ReadTx;
 
+  let result: T | undefined;
+  let failure: { readonly error: unknown } | null = null;
+
   try {
     if (!joined) {
       db.exec('BEGIN DEFERRED');
     }
 
-    const result = assertSynchronous(fn(tx), operation);
+    result = assertSynchronous(fn(tx), operation);
 
     if (!joined) {
       db.exec('COMMIT');
     }
-
-    return result as NotPromise<T>;
   } catch (error) {
+    failure = { error };
     if (!joined) {
       try {
         db.exec('ROLLBACK');
@@ -278,14 +323,23 @@ export function withRead<T>(store: Store, fn: (tx: ReadTx) => T): NotPromise<T> 
         // See withWrite.
       }
     }
-    throw classifyDatabaseError(error, operation);
-  } finally {
-    // Restore the guard before releasing the mode: a failure poisons the store
-    // and must never mask the error that is already propagating.
-    endReadGuard(store, db);
-
-    if (!joined) {
-      state.mode = 'idle';
-    }
   }
+
+  // Restore the guard before releasing the mode. A restore failure poisons the
+  // store; it is only reported as the outcome when the body itself succeeded, so
+  // it can never replace an error the callback already raised.
+  const cleanupFailure = endReadGuard(store, db);
+
+  if (!joined) {
+    state.mode = 'idle';
+  }
+
+  if (failure !== null) {
+    throw classifyDatabaseError(failure.error, operation);
+  }
+  if (cleanupFailure !== null) {
+    throw cleanupFailure;
+  }
+
+  return result as NotPromise<T>;
 }

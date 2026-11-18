@@ -66,7 +66,7 @@ withRead(store, (tx) => T): T
 | 事务控制权 | 回调**没有** `exec`，只有 `prepare()`；`BEGIN/COMMIT/END/ROLLBACK/SAVEPOINT/RELEASE/PRAGMA/ATTACH/DETACH/VACUUM` 一律 `statement_blocked` |
 | 语句生命周期 | 每次 `run/get/all` 与迭代器每次 `next()` 都检查事务是否仍 active；事务结束后 → `transaction_closed` |
 | 句柄形态 | `Tx`（`kind: 'write'`）与 `ReadTx`（`kind: 'read'`）是不同类型，不可互换 |
-| 清理失败 | `query_only` 恢复失败 → Store 标记为不可用（`store_unusable`），且不覆盖原始错误 |
+| 清理失败 | 读守卫恢复失败 → Store 标记 `store_unusable`；若回调本身成功，**调用整体失败**并抛出 `store_unusable`，绝不返回正常结果 |
 | 错误保真 | 非 SQLite 错误原样抛出（identity 不变）；SQLite 错误分类后带 `cause` |
 | 关闭后 | `store_closed`，不会静默重开 |
 
@@ -81,6 +81,12 @@ withRead(store, (tx) => T): T
 > **嵌套读作用域的只读性**：在外层写事务中开启 `query_only` 已在真实 SQLite 上验证——
 > 写入（含 `WITH …` 形式）被 SQLite 以 `read_only_violation` 拒绝，读取仍能看到未提交行，
 > 还原后外层事务可继续写入并正常提交。守卫按深度计数，连续/嵌套的多个读作用域互不干扰。
+>
+> **读守卫清理失败的语义**：`query_only` 无法恢复意味着连接状态未知，因此
+> ① Store 立即标记为不可用，后续 `withRead`/`withWrite` 一律 `store_unusable`；
+> ② 若回调正常返回，`withRead` 抛出 `store_unusable` 而不是返回结果；
+> ③ 若回调已经抛错，**原始错误保持 identity 不被覆盖**，清理失败作为后续拒绝时的 `cause` 记录
+> （消息只描述操作，不含 SQL 或路径）。
 
 ## 6. 字段映射
 
