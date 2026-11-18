@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 
@@ -141,18 +142,123 @@ describe('instance lock', () => {
     lock.release();
   });
 
-  it('only one contender can claim a stale lock', async () => {
+  it('refuses to take over while another process claims the same stale snapshot', async () => {
     const dir = tempDir();
     const pid = await deadPid();
     const path = join(dir, LOCK_FILE_NAME);
-    writeFileSync(path, JSON.stringify({ pid, bootToken: 'dead', startedAt: 'now', dataDir: dir }));
+    const stale = JSON.stringify({ pid, bootToken: 'dead', startedAt: 'now', dataDir: dir });
+    writeFileSync(path, stale);
 
-    // Simulate the loser: another process already renamed the stale file away.
-    const { renameSync } = await import('node:fs');
-    renameSync(path, `${path}.stale-other`);
+    // The claim name is derived from the snapshot bytes, so a contender that saw
+    // the same stale lock competes for this exact file.
+    const claimPath = `${path}.claim.${createHash('sha256').update(stale, 'utf8').digest('hex').slice(0, 16)}`;
+    writeFileSync(claimPath, JSON.stringify({ pid: 1, bootToken: 'other', startedAt: 'now' }));
 
-    const lock = acquireInstanceLock(dir);
-    expect(existsSync(path)).toBe(true);
+    expect(codeOf(() => acquireInstanceLock(dir))).toBe('lock_acquire_failed');
+
+    // Neither file was touched: the claim belongs to the other process.
+    expect(readFileSync(path, 'utf8')).toBe(stale);
+    expect(existsSync(claimPath)).toBe(true);
+  });
+
+  it('never deletes a lock that changed since it was inspected', async () => {
+    const dir = tempDir();
+    const path = join(dir, LOCK_FILE_NAME);
+    const sleeper = spawnSleeper();
+    children.push(sleeper);
+    const livePid = sleeper.pid as number;
+
+    // A stale snapshot that the implementation would normally take over …
+    const dead = await deadPid();
+    writeFileSync(
+      path,
+      JSON.stringify({ pid: dead, bootToken: 'dead', startedAt: 'now', dataDir: dir }),
+    );
+
+    // … but by the time the claim is verified the file holds a live lock. The
+    // simulated swap happens through the injectable liveness probe: the first
+    // check sees a dead pid, then the file is replaced by a live one.
+    const replaced = JSON.stringify({
+      pid: livePid,
+      bootToken: 'live',
+      startedAt: 'now',
+      dataDir: dir,
+    });
+    let checks = 0;
+    expect(
+      codeOf(() =>
+        acquireInstanceLock(dir, {
+          isAlive: () => {
+            checks += 1;
+            if (checks === 1) {
+              // Observation says "dead"; swap in a live lock before verification.
+              writeFileSync(path, replaced);
+              return false;
+            }
+            return false;
+          },
+        }),
+      ),
+    ).toBe('lock_held');
+
+    expect(readFileSync(path, 'utf8')).toBe(replaced);
+  });
+});
+
+describe('invalid lock payloads are rejected, never taken over', () => {
+  const invalidPids: ReadonlyArray<{ label: string; pid: unknown }> = [
+    { label: 'zero', pid: 0 },
+    { label: 'negative', pid: -1 },
+    { label: 'fractional', pid: 1.5 },
+    { label: 'above the safe integer range', pid: 9_007_199_254_740_992 },
+    { label: 'a string', pid: '123' },
+    { label: 'null', pid: null },
+  ];
+
+  it.each(invalidPids)('rejects a lock whose pid is $label and keeps the file', ({ pid }) => {
+    const dir = tempDir();
+    const path = join(dir, LOCK_FILE_NAME);
+    const content = JSON.stringify({ pid, bootToken: 'bad', startedAt: 'now', dataDir: dir });
+    writeFileSync(path, content);
+
+    expect(codeOf(() => acquireInstanceLock(dir))).toBe('lock_unreadable');
+
+    // Untrusted data is never renamed or deleted.
+    expect(readFileSync(path, 'utf8')).toBe(content);
+  });
+
+  it('leaves no claim file behind when rejecting', () => {
+    const dir = tempDir();
+    const path = join(dir, LOCK_FILE_NAME);
+    writeFileSync(
+      path,
+      JSON.stringify({ pid: 0, bootToken: 'bad', startedAt: 'now', dataDir: dir }),
+    );
+
+    expect(codeOf(() => acquireInstanceLock(dir))).toBe('lock_unreadable');
+
+    const leftovers = readdirSync(dir).filter((entry) => entry.includes('.claim.'));
+    expect(leftovers).toStrictEqual([]);
+  });
+
+  it('still takes over a valid dead pid and still refuses a valid live pid', async () => {
+    const deadDir = tempDir();
+    const dead = await deadPid();
+    writeFileSync(
+      join(deadDir, LOCK_FILE_NAME),
+      JSON.stringify({ pid: dead, bootToken: 'dead', startedAt: 'now', dataDir: deadDir }),
+    );
+    const lock = acquireInstanceLock(deadDir);
+    expect(lock.holder.pid).toBe(process.pid);
     lock.release();
+
+    const liveDir = tempDir();
+    const sleeper = spawnSleeper();
+    children.push(sleeper);
+    writeFileSync(
+      join(liveDir, LOCK_FILE_NAME),
+      JSON.stringify({ pid: sleeper.pid, bootToken: 'live', startedAt: 'now', dataDir: liveDir }),
+    );
+    expect(codeOf(() => acquireInstanceLock(liveDir))).toBe('lock_held');
   });
 });

@@ -77,11 +77,21 @@ RUNNING → DRAINING → CHECKPOINTING → CLOSING → STOPPED
 
 1. **原子创建**：`open(..., 'wx')`（O_CREAT\|O_EXCL）；不是"先检查再创建"。
 2. **不假设持锁进程已死**：记录的 PID 仍存活（或 `EPERM` 无法判定）→ 拒绝启动，锁保持原样。
-3. **陈旧锁原子接管**：`process.kill(pid, 0)` 返回 `ESRCH`（可证明已死）才用 `rename` 抢占；
-   `rename` 只能成功一次，另一个竞争者会看到新的锁。
-4. **只有持有者释放**：释放前重新读取并比对 `bootToken`，不匹配则拒绝删除并报 `lock_release_failed`。
-5. **残留锁**：崩溃（SIGKILL）后锁文件残留，下次启动按第 3 条接管；
-   若 PID 被无关进程复用（无法证明已死），启动会拒绝，需人工删除 `soul.lock`。
+3. **陈旧锁按「快照」接管**（SH-007A.R1 修复）：
+   - 读取锁文件并保留其**精确字节**（快照）；
+   - 用 `soul.lock.claim.<sha256(快照)>` 的独占创建选出**唯一**认领者：
+     所有看到同一份旧锁的竞争者会竞争同一个 claim 文件名，只有一个能创建成功；
+   - 认领者**重新读取**锁文件，字节仍与快照一致才继续；不一致说明路径上已是别人的新锁 →
+     抛 `lock_held` 且什么都不改；
+   - 只有此时才 `unlink` 这份旧锁，最终仍由原子创建决定谁拿到锁。
+   因此任何进程都不会删除自己没快照过的锁；「读 PID → rename 固定路径」的竞态不复存在。
+4. **非法锁数据不接管**：PID 不是**正安全整数**（`0`、负数、小数、超出 2^53−1、字符串、null）
+   一律 `lock_unreadable`，不 rename、不删除、不留 claim 文件。
+5. **只有持有者释放**：释放前重新读取并比对 `bootToken`，不匹配则拒绝删除并报 `lock_release_failed`。
+6. **残留锁**：崩溃（SIGKILL）后锁文件残留，下次启动按第 3 条接管；
+   PID 被无关进程复用（无法证明已死）或残留 `soul.lock.claim.*`（认领窗口内崩溃）时，
+   启动拒绝并给出 `claimPath`，需人工确认无 Daemon 在运行后删除。
+   这两种情况下 `soul.db` 都不会被触碰。
 
 跨平台（已在 Windows 11 / Node 24 实测；POSIX 语义一致）：
 
@@ -89,11 +99,15 @@ RUNNING → DRAINING → CHECKPOINTING → CLOSING → STOPPED
 |---|---|---|
 | `O_EXCL` 原子创建 | ✅ | ✅ |
 | `process.kill(pid, 0)` 探活 | ✅（`ESRCH` 表示不存在） | ✅ |
-| `rename` 抢占陈旧锁 | ✅ | ✅ |
+| 独占 claim 文件选主 | ✅ | ✅ |
 | 从父进程投递 SIGINT/SIGTERM | ❌（Node 只能终止，不能投递） | ✅ |
 
 > Windows 上优雅停止的测试改用同进程 `process.emit('SIGINT'/'SIGTERM')`——这正是 Node 内部
 > 触发该事件的同一路径；POSIX 上真实信号到达的是同一个处理函数。
+>
+> 锁只使用 `open('wx')` / `read` / `unlink` 三种原语：Node 不提供可移植的 `flock`/`fcntl`，
+> 因此不假设任何建议锁（advisory lock）语义；同目录内的文件系统原子性由 `O_EXCL` 与单文件
+> 读/删操作承担。网络文件系统若不能保证 `O_EXCL` 原子性，本协议不适用。
 
 ## 5. 启动与关闭行为
 
