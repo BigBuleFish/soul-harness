@@ -74,7 +74,7 @@ withRead(store, (tx) => T): T
 | 句柄形态 | `Tx`（`kind: 'write'`）与 `ReadTx`（`kind: 'read'`）是不同类型，不可互换 |
 | 清理失败 | 读守卫恢复失败 → Store 标记 `store_unusable`；若回调本身成功，**调用整体失败**并抛出 `store_unusable`，绝不返回正常结果 |
 | 事务失效 | Store 一旦 unusable，**当前活动事务同步失效**：新 `prepare` 抛 `store_unusable`，此前已 prepare 的语句抛 `transaction_closed`，`withWrite` 拒绝 COMMIT 并回滚 |
-| 全操作失效 | unusable 后 **Repository 的读也随之拒绝**（`readDatabaseOf` 守卫），不只是写 |
+| 全操作失效 | unusable 后 **Repository 读**（`readDatabaseOf`）与 **Migration 公共 API**（`migrate` / `verifySchema`）同样拒绝，不只是写 |
 | 错误保真 | 非 SQLite 错误原样抛出（identity 不变）；SQLite 错误分类后带 `cause` |
 | 关闭后 | `store_closed`，不会静默重开 |
 

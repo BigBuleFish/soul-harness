@@ -20,6 +20,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { databaseOf, type Store } from '../db/store.js';
 import { allRows, oneRow } from '../db/rows.js';
 import { PersistenceError } from '../errors.js';
+import { assertStoreUsable } from '../tx/coordinator.js';
 import { P1_INDEXES, P1_TABLE_COLUMNS } from './expected-schema.js';
 import { formatMigrationVersion, loadMigrationsFromDir, normalizeMigrations } from './load.js';
 import type { AppliedMigration, MigrateOptions, MigrateResult, MigrationFile } from './types.js';
@@ -106,8 +107,15 @@ function applyOne(db: DatabaseSync, migration: MigrationFile): void {
   }
 }
 
-/** Verifies applied migrations against the source tree, then applies the pending ones. */
+/**
+ * Verifies applied migrations against the source tree, then applies the pending ones.
+ *
+ * Refuses a store whose cleanup failed: migrations are a public Persistence
+ * operation, and "unusable" means no further database access — not even reading
+ * the tracking table. The check runs before any SQL.
+ */
 export function migrate(store: Store, options: MigrateOptions = {}): MigrateResult {
+  assertStoreUsable(store);
   const db = databaseOf(store);
   // Both sources pass the same gate: version range, name shape, uniqueness and
   // ascending order are guaranteed before anything executes.
@@ -179,8 +187,12 @@ export function migrate(store: Store, options: MigrateOptions = {}): MigrateResu
  *
  * Column order is compared too: it catches a table recreated with a different
  * column set that still satisfies "the name exists".
+ *
+ * A store whose cleanup failed is refused before any schema query runs: the
+ * connection state is unknown, so a successful verdict would be meaningless.
  */
 export function verifySchema(store: Store): void {
+  assertStoreUsable(store);
   const db = databaseOf(store);
   const problems: string[] = [];
 
