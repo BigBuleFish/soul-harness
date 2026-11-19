@@ -5,6 +5,7 @@
 - **状态**：**SH-007A 已完成**——配置、结构化日志、数据目录检查、单实例锁、打开 SQLite、
   执行 Migration、启动/关闭状态机与资源逆序释放。
   **Runtime、事件总线、Scheduler、HTTP/WebSocket、健康检查尚未实现**（SH-008 / SH-009）。
+  SH-007B 不是下一批代码：它依赖 SH-008 与 SH-009 的真实组件接入，之后才验收 Daemon 的启动、就绪、关闭、资源释放与失败处理，自身不单独实施代码。
 - **上位文档**：[RUNTIME-LIFECYCLE](../../docs/architecture/RUNTIME-LIFECYCLE.md) §2/§3/§4/§9、
   [PLAN](../../docs/PLAN.md) §6/§7、[MODULES](../../docs/architecture/MODULES.md) §1/§4。
 
@@ -150,6 +151,8 @@ SOUL_DATA_DIR=/var/lib/soul node apps/soul-daemon/dist/main.js     # 前台运�
 | 显式 `PRAGMA wal_checkpoint` | 未实现。关闭只调用 `DatabaseSync.close()`，SQLite 可能自动 checkpoint，但应用层没有显式语句 |
 | 进程级锁之外的并发控制 | 后续 |
 | 结构化日志文件轮转/落盘 | 后续 |
+
+SH-007A 已完成。上表归属不因 SH-007B 改变：Persona Recovery、Runtime Recovery、Event Bus、Scheduler 仍是 SH-008；HTTP API、WebSocket、健康检查仍是 SH-009。SH-007B 不插在它们前面单独写代码。
 
 ## 8. 测试
 

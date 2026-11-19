@@ -95,7 +95,7 @@
 - `apps/soul-daemon`（SH-007A）已实现配置、结构化日志、数据目录探测、单实例锁、打开 SQLite、Migration、Schema 校验、启停状态机与资源逆序释放。进程可以进入 `RUNNING`，但这只表示它持有数据库与锁，**人格认知循环没有运行**。
 - 同一应用**未实现**：Persona 恢复、Runtime 恢复、Event Bus、Scheduler（源码标为 `not_implemented`，owner 记为 SH-008；SH-008 未开始）、HTTP / WebSocket、健康检查（owner 记为 SH-009；未开始）。
 - `CHECKPOINTING` 跳过的是 Runtime checkpoint（`runtime_state.checkpoint_json`），不是 SQLite WAL checkpoint。关闭数据库没有显式 `PRAGMA wal_checkpoint`；`DatabaseSync.close()` 可能触发 SQLite 默认自动 checkpoint。
-- SH-007B **待单独规划**：范围与验收标准未定义，未开始。
+- SH-007B 不是下一代码批次，也不单独实施代码。它依赖 SH-008（Persona / Runtime 恢复、Event Bus、Scheduler）与 SH-009（HTTP / WebSocket、健康检查）接入真实组件之后，再验收 Daemon 的启动、就绪、关闭、资源释放与失败处理。细项通过标准不在此预先规定。
 - `soul-studio`、`soul-cli` 目录不存在。上表对它们的描述仍是目标职责。
 
 ## 5. 端口与传输

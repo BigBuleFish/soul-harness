@@ -6,7 +6,7 @@
 - **实现状态**：**P1 进行中**。文档主体已完成；`packages/contracts`（SH-004）、Monorepo（SH-005）、
   `packages/persistence`（SH-006A–D）与 `apps/soul-daemon` 的生命周期装配（SH-007A）已落地并通过当时的验收。
   这些是基础设施，不是认知 Runtime：不恢复人格、不跑事件总线或调度器、不暴露 API。
-  除 §13 标为已完成的项以外，本文的目标能力均未实现。SH-007B 待单独规划，范围未定义。
+  除 §13 标为已完成的项以外，本文的目标能力均未实现。SH-007A 已完成；SH-007B 不是 SH-008 之前的代码阶段，而是依赖 SH-008 与 SH-009 的后续 Daemon 集成验收节点，不单独实施代码。
 - **配套文档**：架构细节见 `docs/architecture/`，本文只给目标、路线、验收与决议，不重复架构正文。
 
 ---
@@ -367,7 +367,7 @@ Studio 最小页面、CLI 健康检查、单实例锁。
 
 通过标准：不依赖 DSH 启动；可创建/查询/修改 Persona；数据持久化；Daemon 重启恢复；关闭 Studio 后 Daemon 仍运行。
 
-**当前进度：Monorepo（SH-005）、`contracts`（SH-004）、Persistence（SH-006A–D）已完成。Daemon 生命周期装配（SH-007A：配置、结构化日志、数据目录、单实例锁、打开 SQLite、Migration、Schema 校验、启停状态机）已完成；进程可以进入 `RUNNING`，但只持有数据库，人格认知循环没有运行。Persona / Runtime 恢复、Event Bus、Scheduler、本地 API / WebSocket 未开始。SH-007B 待单独规划，范围与验收标准未定义，不得视为已开始。**
+**当前进度：Monorepo（SH-005）、`contracts`（SH-004）、Persistence（SH-006A–D）已完成。Daemon 生命周期装配（SH-007A：配置、结构化日志、数据目录、单实例锁、打开 SQLite、Migration、Schema 校验、启停状态机）已完成；进程可以进入 `RUNNING`，但只持有数据库，人格认知循环没有运行。Persona / Runtime 恢复、Event Bus、Scheduler 仍由未开始的 SH-008 负责；HTTP API、WebSocket、健康检查仍由未开始的 SH-009 负责。SH-007B 不单独实施代码，也不是这两项的前置阶段；它等二者的真实组件接入之后，再做 Daemon 集成验收。**
 
 ### P2 事件接入与 Adapter SDK
 
@@ -537,9 +537,9 @@ Archive 被读取 · 假遗忘 · 梦境外溢 · 幻觉动作 · 会话串记�
 | SH-005 | 初始化 Monorepo、构建系统与 CI | **已完成（工程化）**：根 workspace / turbo / tsconfig / vitest / eslint+prettier / CI |
 | SH-006 | 实现 Persistence 与 Migration | **已完成（代码层面，SH-006A–D）**：`packages/persistence`。SQLite（WAL、单写入者）、Migration、事务协调器、六表 Repository、字段映射，以及 Runtime checkpoint envelope 的存取。不重建认知状态，也不执行显式 `PRAGMA wal_checkpoint` |
 | SH-007A | Daemon 生命周期基础设施 | **已完成（代码层面）**：`apps/soul-daemon`。配置、结构化日志、数据目录、单实例锁、打开 SQLite、Migration 与 Schema 校验、启停状态机。到达 `RUNNING` 只表示进程持有数据库与锁，不含 Persona / Runtime 恢复、Event Bus、Scheduler、HTTP / WebSocket。`CHECKPOINTING` 跳过的是 Runtime checkpoint；关闭连接没有显式 `PRAGMA wal_checkpoint`（SQLite 可能在 `close` 时做默认自动 checkpoint） |
-| SH-007B | — | **待单独规划**。范围与验收标准未定义，**未开始** |
-| SH-008 | 实现 Runtime 最小功能 | 未开始 |
-| SH-009 | 实现本地 API 与 WebSocket | 未开始 |
+| SH-007B | Daemon 集成验收节点 | **未开始**。不是 SH-008 的前置代码阶段，**不单独实施代码**。依赖 SH-008 与 SH-009 的真实组件接入之后，验收 Daemon 的启动、就绪、关闭、资源释放与失败处理。此处不预先规定实现内容，也不预先写细项通过标准 |
+| SH-008 | 实现 Runtime 最小功能 | 未开始。既有归属不变：Persona Recovery、Runtime Recovery、Event Bus、Scheduler |
+| SH-009 | 实现本地 API 与 WebSocket | 未开始。既有归属不变：HTTP API、WebSocket、健康检查 |
 | SH-010 | 实现 Adapter SDK 最小版本 | 未开始 |
 | SH-011 | 实现 Soul Studio 最小界面 | 未开始 |
 | SH-012 | 完成第一阶段集成验收 | 未开始 |
@@ -547,7 +547,8 @@ Archive 被读取 · 假遗忘 · 梦境外溢 · 幻觉动作 · 会话串记�
 > "已完成（文档层面）"仅表示文档已交付，**不含任何可执行代码**。
 > SH-004、SH-005、SH-006 与 SH-007A 已交付可测试的基础设施代码，**仍然没有认知 Runtime**：
 > 不生成主观记忆、不恢复人格、不运行事件总线或调度器、不暴露 API。
-> 原任务行「SH-007 实现独立 Daemon 生命周期」只完成了 SH-007A 这一段；SH-007B 未定义、未开始。
+> 原任务行「SH-007 实现独立 Daemon 生命周期」的代码部分即 SH-007A，已完成。
+> SH-007B 改为后续集成验收节点：依赖 SH-008 与 SH-009，不单独实施代码，也不阻塞二者开工。
 > SH-003.2 不新增任何连续收口任务（无 SH-003.3 及以后）；剩余问题一律记入各文档的 OPEN 项
 > （带最迟决策阶段）或本表的任务依赖，不得以"以后再说"消失。
 
