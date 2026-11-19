@@ -55,6 +55,8 @@ export interface ChildWatch {
   readonly spawnError: Error | null;
   /** True once the deadline passed without a `close`. Never means "closed". */
   readonly timedOut: boolean;
+  /** The deadline this watcher actually uses (default or overridden). */
+  readonly timeoutMs: number;
   /** @internal Resolves when the deadline passes; `terminateChild` races it. */
   readonly timeoutSignal: Promise<void>;
 }
@@ -154,6 +156,7 @@ export function watchChild(child: ChildProcess, options: WatchOptions = {}): Chi
     get timedOut(): boolean {
       return timedOut;
     },
+    timeoutMs,
     timeoutSignal,
   };
 }
@@ -187,7 +190,8 @@ export async function terminateChild(entry: Terminable): Promise<void> {
     if (child.exitCode === null && child.signalCode === null && child.pid !== undefined) {
       child.kill('SIGKILL');
     }
-    throw new ChildCloseTimeoutError(child.pid, CHILD_CLOSE_TIMEOUT_MS);
+    // Report the deadline this watcher actually used, not the module default.
+    throw new ChildCloseTimeoutError(child.pid, watch.timeoutMs);
   }
 
   if (typeof outcome === 'object') {

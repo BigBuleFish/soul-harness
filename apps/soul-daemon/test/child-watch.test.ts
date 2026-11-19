@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 
 import {
+  CHILD_CLOSE_TIMEOUT_MS,
   ChildCloseTimeoutError,
   terminateAll,
   terminateChild,
@@ -173,11 +174,49 @@ describe('watchChild', () => {
     expect(failures).toHaveLength(1);
     expect(failures[0]).toBeInstanceOf(ChildCloseTimeoutError);
     expect((failures[0] as ChildCloseTimeoutError).pid).toBe(4242);
+    // The reported deadline must be the one this watcher actually used.
+    expect((failures[0] as ChildCloseTimeoutError).timeoutMs).toBe(100);
+    expect(watch.timeoutMs).toBe(100);
+    expect((failures[0] as ChildCloseTimeoutError).message).toContain('100 ms');
 
     // The timeout is not a close: nothing claimed the child was cleaned up.
     expect(watch.timedOut).toBe(true);
     expect(closedResolved).toBe(false);
     expect(directoryRemoved).toBe(false);
+  });
+
+  it('carries the watcher deadline into the timeout error', async () => {
+    const fake = new NeverClosingChild();
+    const child = asChildProcess(fake);
+    const watch = watchChild(child, { timeoutMs: 100 });
+    fake.emit('spawn');
+
+    expect(watch.timeoutMs).toBe(100);
+    const error = await terminateChild({ child, watch }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ChildCloseTimeoutError);
+    expect((error as ChildCloseTimeoutError).timeoutMs).toBe(100);
+    expect((error as ChildCloseTimeoutError).message).toContain('100 ms');
+    expect((error as ChildCloseTimeoutError).message).not.toContain('30000');
+  });
+
+  it('falls back to the module default deadline', async () => {
+    const fake = new NeverClosingChild();
+    const child = asChildProcess(fake);
+    const watch = watchChild(child); // no override
+    fake.emit('spawn');
+
+    expect(CHILD_CLOSE_TIMEOUT_MS).toBe(30_000);
+    expect(watch.timeoutMs).toBe(CHILD_CLOSE_TIMEOUT_MS);
+
+    // terminateChild builds the error from the watch's own deadline, so this is
+    // exactly what a default watcher would report.
+    const error = new ChildCloseTimeoutError(child.pid, watch.timeoutMs);
+    expect(error.timeoutMs).toBe(30_000);
+    expect(error.message).toContain('30000 ms');
+
+    fake.emit('close');
+    await watch.closed;
   });
 });
 
