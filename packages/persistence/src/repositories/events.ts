@@ -9,7 +9,7 @@
  *      `(persona_id, adapter_id, source, adapter_event_ref)` rather than a scan.
  */
 
-import { isAdapterEventRef } from '@soul-harness/contracts';
+import { isAdapterEventRef, isEventId } from '@soul-harness/contracts';
 import type {
   AdapterId,
   AttentionOutcome,
@@ -104,6 +104,25 @@ export interface UpdateEventStatusInput {
   readonly statusReason: StatusReason | null;
   readonly attentionOutcome: AttentionOutcome | null;
   readonly updatedAt: number;
+}
+
+/** Requests the only conditional terminal transition recovery is allowed to make. */
+export interface ExpireEventInput {
+  readonly id: EventId;
+  readonly updatedAt: number;
+}
+
+/**
+ * Rejects a cursor that cannot be an event id before any database access.
+ *
+ * Validation runs first so a malformed cursor never reaches the SQL layer.
+ */
+function assertAfterId(afterId: EventId | undefined): void {
+  if (afterId !== undefined && !isEventId(afterId)) {
+    throw new PersistenceError('invalid_argument', 'afterId must be a valid EventId', {
+      details: { field: 'afterId' },
+    });
+  }
 }
 
 function mapEvent(raw: Readonly<Record<string, unknown>>): EventRow {
@@ -238,6 +257,74 @@ export function createEventRepository(store: Store) {
         bounded,
       );
       return rows.map(mapEvent);
+    },
+
+    /**
+     * Keyset page ordered by primary key, filtered to one persona and one status.
+     *
+     * Same contract as `personas.listPage`: the cursor and the ORDER BY both use
+     * `id`, so paging cannot skip or repeat rows; callers stop when the page is
+     * shorter than `limit`. The ordering differs from `listByPersonaStatus`,
+     * which sorts by `received_at` (not unique) and is therefore not pageable.
+     */
+    listPageByPersonaStatus(input: {
+      readonly personaId: PersonaId;
+      readonly status: EventStatus;
+      readonly afterId?: EventId;
+      readonly limit?: number;
+    }): readonly EventRow[] {
+      const bounded = assertLimit(input.limit);
+      assertAfterId(input.afterId);
+
+      const db = readDatabaseOf(store);
+      const rows =
+        input.afterId === undefined
+          ? allRows<Record<string, unknown>>(
+              db.prepare(
+                `SELECT ${COLUMNS} FROM events
+                 WHERE persona_id = ? AND status = ?
+                 ORDER BY id ASC LIMIT ?`,
+              ),
+              input.personaId,
+              input.status,
+              bounded,
+            )
+          : allRows<Record<string, unknown>>(
+              db.prepare(
+                `SELECT ${COLUMNS} FROM events
+                 WHERE persona_id = ? AND status = ? AND id > ?
+                 ORDER BY id ASC LIMIT ?`,
+              ),
+              input.personaId,
+              input.status,
+              input.afterId,
+              bounded,
+            );
+
+      return rows.map(mapEvent);
+    },
+
+    /**
+     * Atomically moves an event to `expired`/`buffer_lost`, but only while it is
+     * still `received` or `accepted`.
+     *
+     * The guard is part of the same UPDATE, so it cannot be raced: terminal rows
+     * (`acted` / `rejected` / `expired`) are never rewritten, and a losing race
+     * returns `null` having touched nothing — including `status_reason` and
+     * `attention_outcome`, which are deliberately not in the SET list.
+     */
+    expireIfActive(input: ExpireEventInput): EventRow | null {
+      return withWrite(store, (tx) => {
+        const changes = tx
+          .prepare(
+            `UPDATE events
+                SET status = 'expired', status_reason = 'buffer_lost', updated_at = ?
+              WHERE id = ? AND status IN ('received', 'accepted')`,
+          )
+          .run(input.updatedAt, input.id).changes;
+
+        return Number(changes) === 0 ? null : selectById(tx, input.id);
+      });
     },
   };
 }

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * personas repository.
  *
  * `version` is bumped by the database statement (DATA-MODEL §1 / §6: every
@@ -6,11 +6,13 @@
  * the caller, so it cannot be spoofed.
  */
 
+import { isPersonaId } from '@soul-harness/contracts';
 import type { BootId, PersonaId } from '@soul-harness/contracts';
 
 import { allRows, oneRow, type StatementSource } from '../db/rows.js';
 import { readDatabaseOf } from '../db/read.js';
 import type { Store } from '../db/store.js';
+import { PersistenceError } from '../errors.js';
 import { camelizeRow } from '../mapping.js';
 import { withWrite } from '../tx/coordinator.js';
 import type { PersonaRow, PersonaState } from '../types/rows.js';
@@ -31,6 +33,35 @@ export interface UpdatePersonaStateInput {
   readonly id: PersonaId;
   readonly state: PersonaState;
   readonly updatedAt: number;
+}
+
+/** Keyset page request; `afterId` is the last id of the previous page. */
+export interface ListPersonaPageInput {
+  readonly afterId?: PersonaId;
+  readonly limit?: number;
+}
+
+/** Compare-and-set request: both expectations must hold or nothing is written. */
+export interface CompareAndSetPersonaStateInput {
+  readonly id: PersonaId;
+  readonly expectedState: PersonaState;
+  readonly expectedVersion: number;
+  readonly nextState: PersonaState;
+  readonly updatedAt: number;
+}
+
+/**
+ * Rejects a cursor that cannot be a persona id before any database access.
+ *
+ * Validation runs first so a malformed cursor never reaches the SQL layer and
+ * never depends on store state.
+ */
+function assertAfterId(afterId: PersonaId | undefined): void {
+  if (afterId !== undefined && !isPersonaId(afterId)) {
+    throw new PersistenceError('invalid_argument', 'afterId must be a valid PersonaId', {
+      details: { field: 'afterId' },
+    });
+  }
 }
 
 function mapPersona(raw: Readonly<Record<string, unknown>>): PersonaRow {
@@ -106,6 +137,62 @@ export function createPersonaRepository(store: Store) {
         bounded,
       );
       return rows.map(mapPersona);
+    },
+
+    /**
+     * Keyset page ordered by primary key.
+     *
+     * The cursor and the ORDER BY use the same value (`id`), which is unique and
+     * unforgeable per row, so a page boundary can never skip or repeat a row.
+     * Callers stop when fewer than `limit` rows come back. `list()` deliberately
+     * sorts by `created_at` (not unique) and is therefore not pageable.
+     */
+    listPage(input: ListPersonaPageInput = {}): readonly PersonaRow[] {
+      const bounded = assertLimit(input.limit);
+      assertAfterId(input.afterId);
+
+      const db = readDatabaseOf(store);
+      const rows =
+        input.afterId === undefined
+          ? allRows<Record<string, unknown>>(
+              db.prepare(`SELECT ${COLUMNS} FROM personas ORDER BY id ASC LIMIT ?`),
+              bounded,
+            )
+          : allRows<Record<string, unknown>>(
+              db.prepare(`SELECT ${COLUMNS} FROM personas WHERE id > ? ORDER BY id ASC LIMIT ?`),
+              input.afterId,
+              bounded,
+            );
+
+      return rows.map(mapPersona);
+    },
+
+    /**
+     * Writes the next state only if both the state and the version still match.
+     *
+     * The comparison and the upgrade happen inside one statement, so a concurrent
+     * state change cannot be overwritten. `version` is bumped by the statement
+     * (INV-V: any committed state write increments it). Returns `null` when either
+     * expectation fails — in that case nothing was written.
+     */
+    compareAndSetState(input: CompareAndSetPersonaStateInput): PersonaRow | null {
+      return withWrite(store, (tx) => {
+        const changes = tx
+          .prepare(
+            `UPDATE personas
+                SET state = ?, version = version + 1, updated_at = ?
+              WHERE id = ? AND state = ? AND version = ?`,
+          )
+          .run(
+            input.nextState,
+            input.updatedAt,
+            input.id,
+            input.expectedState,
+            input.expectedVersion,
+          ).changes;
+
+        return Number(changes) === 0 ? null : selectById(tx, input.id);
+      });
     },
   };
 }

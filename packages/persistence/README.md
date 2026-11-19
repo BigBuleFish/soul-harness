@@ -116,9 +116,9 @@ withRead(store, (tx) => T): T
 
 | 表 | 方法 |
 |---|---|
-| `personas` | `insert` / `getById` / `updateState`（版本自增）/ `list(limit)` |
+| `personas` | `insert` / `getById` / `updateState`（版本自增）/ `compareAndSetState`（条件写）/ `list(limit)` / `listPage`（键集分页） |
 | `sessions` | `insert` / `getById` / `findActiveByExternal` / `close` / `listByPersona` |
-| `events` | `insert`（archive 三列不可设；`summary` 只接受 NULL；`adapterEventRef` 强制格式）/ `getById` / `findByDedupeKey` / `updateStatus` / `listByPersonaStatus` |
+| `events` | `insert`（archive 三列不可设；`summary` 只接受 NULL；`adapterEventRef` 强制格式）/ `getById` / `findByDedupeKey` / `updateStatus` / `expireIfActive`（条件写）/ `listByPersonaStatus` / `listPageByPersonaStatus`（键集分页） |
 | `tasks` | `insert` / `getById` / `updateState` / `listByPersonaState` |
 | `runtime_state` | `upsert`（不触碰 checkpoint）/ `get` |
 | `checkpoints` | `load` / `save`（见 §7.1；**无 clear**） |
@@ -176,6 +176,35 @@ const stored = checkpoints.save({ personaId, epoch, refs?, updatedAt });
 - `runtime_state.upsert` 不写 `checkpoint_json`；`checkpoints.save` 只写 `checkpoint_json` 与 `updated_at`，两边互不覆盖。
 - 嵌套调用仍受 SH-006B 约束：`save` 在外层事务内 → `nested_write`；Store unusable → `store_unusable`。
 - **不提供 `clear()`**：架构只定义了恢复时"丢弃"过期检查点，没有授权删除已存检查点的接口。
+
+### 7.2 键集分页与条件写（SH-008P）
+
+恢复流程需要"能证明读全"和"不覆盖并发修改"，因此新增四个方法；**表结构、索引、迁移均未改动**。
+
+| 方法 | 语义 |
+|---|---|
+| `personas.listPage({ afterId?, limit? })` | 按主键 `id` 升序的键集分页 |
+| `events.listPageByPersonaStatus({ personaId, status, afterId?, limit? })` | 同上，先按 `persona_id` + `status` 过滤 |
+| `personas.compareAndSetState({ id, expectedState, expectedVersion, nextState, updatedAt })` | 条件写；`version` 由语句自增（INV-V） |
+| `events.expireIfActive({ id, updatedAt })` | 条件写：仅 `received`/`accepted` → `expired` + `buffer_lost` |
+
+**分页约定**
+
+- 游标与 `ORDER BY` **使用同一列 `id`**（唯一、主键索引），因此翻页不可能跳行或重复；
+- 首屏不传 `afterId`；末页返回行数 `< limit` 即结束；空页同样视为结束；
+- `id` 之外的排序键（`created_at` / `received_at`）**不可**用作游标——它们不唯一；
+  原有的 `list` / `listByPersonaStatus` 保持时间排序，不能用于完整扫描；
+- 一次 `withRead` 内连续调用多页 = 同一读事务快照（WAL）：期间其他连接提交的
+  插入/删除对本轮扫描不可见。快照外的变化由条件写 + 调用方的复核扫描处理；
+- 上限仍为 500/次；非法游标或越界 `limit` → `invalid_argument`，且在**任何数据库访问之前**抛出。
+
+**条件写约定**
+
+- 守卫写在同一条 `UPDATE` 的 `WHERE` 中，不存在"先读后写"的竞态；
+- 条件不匹配返回 `null`，**未修改任何字段**；
+- `expireIfActive` 的 `SET` 子句不含 `status_reason` 之外的字段，`attention_outcome` 保持原值；
+  终态 `acted` / `rejected` / `expired` 永远不会被它命中；
+- `version` 严格自增是持久化不变式：CAS 以 `version` 为令牌，若允许写入后版本不变会引入 ABA。
 
 ## 8. Migration 机制
 
