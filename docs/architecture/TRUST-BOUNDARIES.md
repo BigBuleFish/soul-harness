@@ -427,7 +427,7 @@ SQLite FTS5 索引内容默认是**明文**，`node:sqlite` 无法对索引加�
 ### 11.3 WAL 与 secure_delete
 
 - 删除行不等于从磁盘抹除。必须开启 `PRAGMA secure_delete = ON`，或对敏感内容永远只存密文。
-- WAL 会保留旧页：遗忘事务完成后必须执行 `PRAGMA wal_checkpoint(TRUNCATE)`。
+- WAL 会保留旧页：遗忘事务完成后必须执行 `PRAGMA wal_checkpoint(TRUNCATE)`。（目标约束，尚未实现为应用层显式语句。`DatabaseSync.close()` 可能触发 SQLite 默认自动 checkpoint，不能代替本条。）
 - 删除后必须做一次物理验证：在库文件与 `-wal` 中搜索金丝雀，命中数必须为 0。
 
 ### 11.4 备份

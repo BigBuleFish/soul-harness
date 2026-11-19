@@ -48,8 +48,8 @@ RUNNING → DRAINING → CHECKPOINTING → CLOSING → STOPPED
 | 步骤 | 本批行为 |
 |---|---|
 | DRAINING | 停止接收新的生命周期工作（当前没有调度派发，标记为 `not_implemented`） |
-| CHECKPOINTING | **不写检查点**：没有 Runtime 就没有合法 checkpoint；记录 `checkpoint_skipped` |
-| CLOSING | 按逆序释放资源：先关 Store，再释放锁 |
+| CHECKPOINTING | **不写 Runtime checkpoint**（没有 Runtime 就没有合法的 `checkpoint_json`）；记录 `checkpoint_skipped`。这不是 SQLite WAL checkpoint |
+| CLOSING | 按逆序释放资源：先 `Store.close()`（无显式 `PRAGMA wal_checkpoint`；SQLite 可能在关闭时做默认自动 checkpoint），再释放锁 |
 | STOPPED | 完成；清理失败会使 `stop()` 拒绝并给出 `shutdown_failed` |
 
 启动失败：已取得的资源按逆序释放，失败原因与清理失败计数一并报告；
@@ -143,10 +143,11 @@ SOUL_DATA_DIR=/var/lib/soul node apps/soul-daemon/dist/main.js     # 前台运�
 
 | 能力 | 归属 |
 |---|---|
-| Persona / Runtime 恢复（checkpoint、队列、活跃思维） | SH-008 |
+| Persona / Runtime 恢复（Runtime checkpoint、队列、活跃思维） | SH-008 |
 | 事件总线、Scheduler | SH-008 |
 | HTTP / WebSocket API、健康检查端点 | SH-009 |
-| 检查点写入（当前阶段无合法 checkpoint 可写） | SH-008 |
+| Runtime checkpoint 写入（当前阶段无合法 checkpoint 可写） | SH-008 |
+| 显式 `PRAGMA wal_checkpoint` | 未实现。关闭只调用 `DatabaseSync.close()`，SQLite 可能自动 checkpoint，但应用层没有显式语句 |
 | 进程级锁之外的并发控制 | 后续 |
 | 结构化日志文件轮转/落盘 | 后续 |
 

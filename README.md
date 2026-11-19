@@ -22,8 +22,9 @@ Monorepo 根工程化已完成（SH-005）。
 | P1 | Monorepo 骨架、Daemon 生命周期、Persistence、最小 API | **Monorepo 骨架（SH-005）**、**Persistence（SH-006A–D）**、**Daemon 生命周期与装配（SH-007A）** 已完成；Runtime / API / WebSocket 未开始 |
 | P2+ | 事件接入、记忆网络、激活、自主认知、遗忘、睡眠梦境、外部适配 | 未开始 |
 
-目录和文档存在**不代表**功能完成。任何"已实现"必须以测试与验收记录为凭
-（目前唯一满足此标准的是 `packages/contracts`，测试命令见其 README）。
+目录和文档存在**不代表**功能完成。任何"已实现"必须以测试与验收记录为凭。
+目前满足该标准的是 `packages/contracts`（SH-004）、`packages/persistence`（SH-006A–D）
+和 `apps/soul-daemon` 的生命周期装配（SH-007A）。这三者都不是认知 Runtime。
 
 ## 文档入口
 
@@ -45,9 +46,11 @@ Monorepo 根工程化已完成（SH-005）。
 
 ```text
 .
-├─ apps/                      # 未来的 soul-daemon / soul-studio（尚未创建）
+├─ apps/
+│  └─ soul-daemon/            # 生命周期与装配（SH-007A）。无认知循环，无 HTTP/WS
 ├─ packages/
-│  └─ contracts/              # 协议契约包（已实现，零运行时依赖）
+│  ├─ contracts/              # 协议契约包（SH-004，零运行时依赖）
+│  └─ persistence/            # SQLite 持久化（SH-006A–D）
 ├─ tools/consumer-check/      # 跨包导入验证：按包名导入 ESM + d.ts
 ├─ docs/                      # 架构文档（唯一基线）
 ├─ .github/workflows/ci.yml   # CI：format / lint / typecheck / test / build / consumer
@@ -56,12 +59,16 @@ Monorepo 根工程化已完成（SH-005）。
 ├─ pnpm-lock.yaml             # 唯一 lockfile
 ├─ turbo.json                 # 任务图与缓存
 ├─ tsconfig.base.json         # 统一 TS 配置（各包 extends）
-└─ vitest.config.ts           # 统一测试入口（projects: packages/*）
+└─ vitest.config.ts           # 统一测试入口（projects: packages/*、apps/*）
 ```
+
+`soul-studio` 与 `soul-cli` 尚未创建。
 
 | 包 | 内容 | 状态 |
 |---|---|---|
-| [packages/contracts](packages/contracts/README.md) | 协议类型、10 份 JSON Schema、枚举与标识符格式；双层信封（适配器输入层 / Ingress 归一化层）、零运行时依赖、无 IO、不生成 ID | **已实现（协议层）**，含测试与正反 fixtures |
+| [packages/contracts](packages/contracts/README.md) | 协议类型、10 份已注册 JSON Schema、枚举与标识符格式；双层信封（适配器输入层 / Ingress 归一化层）、零运行时依赖、无 IO、不生成 ID | **已实现（协议层，SH-004）**，含测试与正反 fixtures |
+| [packages/persistence](packages/persistence/README.md) | SQLite（WAL、单写入者）、Migration、事务协调器、六表 Repository、字段映射、Runtime checkpoint envelope 存取 | **已完成（SH-006A–D）**。不重建 Runtime；无显式 `PRAGMA wal_checkpoint` |
+| [apps/soul-daemon](apps/soul-daemon/README.md) | 配置、结构化日志、数据目录、单实例锁、打开 SQLite、Migration、启停状态机 | **已完成（SH-007A）**。Persona / Runtime 恢复、Event Bus、Scheduler、API 未实现 |
 
 ## 旧系统
 
@@ -88,7 +95,7 @@ pnpm install --frozen-lockfile   # 安装（唯一 lockfile 在根）
 pnpm run format:check            # Prettier 检查（代码；docs/ 与 fixtures 不参与）
 pnpm run lint                    # ESLint（flat config，ts + js）
 pnpm run typecheck               # turbo typecheck + 跨包 consumer 类型检查
-pnpm test                        # Vitest（根配置 projects: packages/*）
+pnpm test                        # Vitest（根配置 projects: packages/*、apps/*）
 pnpm run build                   # turbo build
 pnpm run check:consumer          # 按包名导入 ESM + d.ts 的实际验证
 ```

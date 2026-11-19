@@ -1,7 +1,7 @@
 # OVERVIEW — Soul Harness 总体架构
 
 - **地位**：本文件与 `TRUST-BOUNDARIES.md`、`DATA-MODEL.md`、`RUNTIME-LIFECYCLE.md`、`MODULES.md`、`IDENTITY-PROTOCOL.md`、`AI-DEVELOPMENT-RULES.md` 共同构成**唯一架构基线**。
-- **状态**：设计中。系统尚未实现，本文描述目标形态，不代表已有功能。
+- **状态**：本文描述目标形态。基础设施已部分落地（`contracts`、`persistence`、Daemon 生命周期装配）；认知 Runtime 尚未运行。已实现范围以 §9 为准，不得把目标架构读成现行能力。
 - **上位决策**：`docs/adr/ADR-001-independent-runtime.md`
 
 ---
@@ -131,12 +131,19 @@ Soul Harness 是一个**独立常驻的认知运行时**：人格身份、主观
 
 | 层 | 状态 |
 |---|---|
-| 架构文档 | 设计中（本批交付） |
-| Repo 骨架 / Daemon / Contracts / Persistence | **未实现** |
+| 架构文档 | 基线已交付；目标形态仍以本文为准，实现状态以本表为准 |
+| Monorepo 骨架 | **已实现**（SH-005） |
+| `contracts` | **已实现（协议层，SH-004）**：类型与 10 份已注册 Schema。不生成 ID，无 IO |
+| `persistence` | **已实现（SH-006A–D）**：连接、WAL 模式、单写入事务、Migration、字段映射、Runtime checkpoint envelope 存取。不执行显式 `PRAGMA wal_checkpoint`，不重建 Runtime |
+| `soul-daemon` | **已实现生命周期装配（SH-007A）**：配置、日志、数据目录、单实例锁、打开 SQLite、Migration、Schema 校验、启停状态机。进入 `RUNNING` 只表示进程持有数据库，**不是**人格认知循环已运行 |
+| Persona / Runtime 恢复、Event Bus、Scheduler | **未实现**。Daemon 源码把这些步骤标为 `not_implemented`（owner 记为 SH-008）；SH-008 未开始 |
+| HTTP / WebSocket / 健康检查 | **未实现**（源码 owner 记为 SH-009；该任务未开始） |
 | 记忆图 / 激活 / 睡眠 / 梦境 / 执行网关 | **未实现** |
-| Studio | **未实现** |
+| Studio / CLI | **未实现**（目录不存在） |
+| SH-007B | **待单独规划**。范围与验收标准未定义，未开始 |
 
 > 目录和文档存在**不代表**功能完成。任何"已实现"的声明必须以测试与验收记录为凭。
+> Daemon 基础设施已通过 SH-007A 验收，不得因此声称人格、记忆或思维进程已经在运行。
 
 ## 10. 术语
 

@@ -444,7 +444,7 @@ SQLite FTS5 的索引内容默认是**明文**，`node:sqlite` 无法对索引�
 相关硬要求（详见 `TRUST-BOUNDARIES.md` §11）：
 
 - `PRAGMA secure_delete = ON`，否则删行不从磁盘抹除。
-- 遗忘事务结束必须 `PRAGMA wal_checkpoint(TRUNCATE)`。
+- 遗忘事务结束必须 `PRAGMA wal_checkpoint(TRUNCATE)`。（目标约束。当前代码没有这条显式语句；连接关闭时 SQLite 可能做默认自动 checkpoint，二者不是同一件事。）
 - 删除后必须在库文件与 `-wal` 中搜索金丝雀，命中数须为 0。
 
 **节点类型与关系类型是开放注册表**，新增类型只需注册，不需要改表结构。

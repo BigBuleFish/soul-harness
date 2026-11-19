@@ -197,6 +197,6 @@ const stored = checkpoints.save({ personaId, epoch, refs?, updatedAt });
 2. `verifySchema()` 只覆盖 P1 六表；新增迁移必须同步更新 `expected-schema.ts`。
 3. 行类型里的 ID 使用 contracts 品牌类型，但**读取不再校验格式**：数据库是存储，不是鉴权边界。
 4. `PersonaState` / `TaskState` 目前定义在本包（contracts 未提供）；迁入 contracts 属后续契约变更。
-5. 单实例锁与 WAL checkpoint on close（Daemon）尚未实现。
+5. **WAL checkpoint 不在本包**。本包不执行显式 `PRAGMA wal_checkpoint`。`Store.close()` 只关闭 `DatabaseSync`；SQLite 在关闭时可能做默认自动 checkpoint，这不保证 `TRUNCATE`，也不等于遗忘语义。单实例锁已在 `apps/soul-daemon`（SH-007A）实现，不属于本包。
 6. 检查点只提供 envelope 存取：**业务载荷（调度器的具体游标语义、活跃思维集合的判定）由后续 Runtime 批次定义**；本包不解释 `refs` 的含义，只校验形状。
 7. 检查点保存是**独立事务**：SH-006B 规定事务回调必须同步且禁止嵌套写，因此运行期无法把 checkpoint 保存并入更大的事务；若未来需要，属于事务契约变更。

@@ -1,7 +1,8 @@
 # RUNTIME-LIFECYCLE — 运行时生命周期
 
 - **地位**：Daemon、Persona、Thought、Event、Sleep 的状态机与启停顺序权威描述。
-- **状态**：设计中。所有状态名在代码中为**枚举常量**，不得散落字符串字面量。
+- **状态**：下表是目标顺序，不是完成清单。SH-007A 只实现了基础设施半段（配置、日志、数据目录、单实例锁、打开 SQLite、Migration、Schema 校验、启停状态机）。Persona / Runtime 恢复、Event Bus、Scheduler、API 未实现。进入 `RUNNING` 不表示人格认知循环已运行。
+- **实现注记**：状态名在已落地的 Daemon 代码中是集中常量，不得在新代码里散落同义字符串。
 
 ---
 
@@ -50,6 +51,8 @@
 | 8 | 释放单实例锁 | 最后一步 |
 
 强制终止（进程被杀）下，靠 §4 的恢复规则保证一致性；**不保证**梦境或睡眠任务状态。
+
+> **当前实现（SH-007A，不修改上表）**。Daemon 会进入 `CHECKPOINTING` 与 `CLOSING`，但步骤 1–6 里依赖 Runtime 或 API 的动作没有执行。`checkpoint_skipped` 跳过的是 **Runtime checkpoint**（写入 `runtime_state.checkpoint_json` 的队列游标、活跃线程与 epoch），不是 SQLite WAL checkpoint。步骤 7 目前只是 `Store.close()` → `DatabaseSync.close()`：应用层**没有**显式 `PRAGMA wal_checkpoint`。SQLite 在关闭连接时**可能**按默认策略做自动 checkpoint。这既不是“显式 WAL checkpoint 已实现”，也不是“关闭时绝对不会 checkpoint”。遗忘事务要求的 `PRAGMA wal_checkpoint(TRUNCATE)`（DATA-MODEL §4.1、TRUST-BOUNDARIES §11.3）仍是未落地的目标约束。单实例锁的获取与释放已在 SH-007A 实现。
 
 ## 4. 崩溃恢复规则
 
