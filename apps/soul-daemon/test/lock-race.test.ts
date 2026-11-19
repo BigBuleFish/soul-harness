@@ -28,6 +28,12 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { LOCK_FILE_NAME } from '../src/lock.js';
+import {
+  terminateAll,
+  terminateChild,
+  watchChild,
+  type ChildWatch,
+} from './helpers/child-watch.js';
 import { buildDaemonApp, makeTempDir, removeTempDir } from './helpers/harness.js';
 
 const LOCK_CONTENDER = join(import.meta.dirname, 'fixtures', 'lock-contender.mjs');
@@ -35,9 +41,6 @@ const LOCK_CONTENDER = join(import.meta.dirname, 'fixtures', 'lock-contender.mjs
 /** One gate per phase: the seed holder and the racers never share a file. */
 const SEED_GATE = 'gate-seed';
 const RACE_GATE = 'gate-race';
-
-/** A child that never emits `close` is a bug, not something to wait out forever. */
-const CLOSE_TIMEOUT_MS = 30_000;
 
 interface ContenderResult {
   readonly ok: boolean;
@@ -49,49 +52,12 @@ interface ContenderResult {
 interface Contender {
   readonly child: ChildProcess;
   readonly readyPath: string;
-  /** Resolves once the child emitted `close` (or failed to spawn). Created once. */
-  readonly closed: Promise<void>;
+  /** Created once at spawn; every cleanup path awaits this same instance. */
+  readonly watch: ChildWatch;
   output(): string;
 }
 
 const contenders: Contender[] = [];
-
-/**
- * Watches a child from the moment it is spawned.
- *
- * `close` fires after the stdio streams are drained, which is exactly what the
- * cleanup needs; `error` covers a spawn failure, where `close` may never arrive.
- * The promise is created once and reused by every code path.
- */
-function watchClose(child: ChildProcess): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    let settled = false;
-
-    const finish = (error?: Error): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      if (error === undefined) {
-        resolve();
-      } else {
-        reject(error);
-      }
-    };
-
-    const timer = setTimeout(() => {
-      finish(
-        new Error(`child ${String(child.pid)} did not emit "close" within ${CLOSE_TIMEOUT_MS} ms`),
-      );
-    }, CLOSE_TIMEOUT_MS);
-    // The watchdog must not keep the test process alive on its own.
-    timer.unref();
-
-    child.once('close', () => finish());
-    child.once('error', (error) => finish(error));
-  });
-}
 
 function forget(contender: Contender): void {
   const index = contenders.indexOf(contender);
@@ -108,13 +74,7 @@ function forget(contender: Contender): void {
  * spawn (`exitCode` is never treated as proof that stdio is closed).
  */
 async function terminate(contender: Contender): Promise<void> {
-  const { child } = contender;
-
-  if (child.exitCode === null && child.signalCode === null && child.pid !== undefined) {
-    child.kill('SIGKILL');
-  }
-
-  await contender.closed;
+  await terminateChild({ child: contender.child, watch: contender.watch });
 }
 
 /** Terminates one contender, waits for `close`, and stops tracking it. */
@@ -126,7 +86,9 @@ async function stopAndWait(contender: Contender): Promise<void> {
 /** Kills every tracked contender and waits for all of their `close` events. */
 async function killAllAndWait(): Promise<void> {
   const pending = contenders.splice(0, contenders.length);
-  await Promise.all(pending.map((contender) => terminate(contender)));
+  await terminateAll(
+    pending.map((contender) => ({ child: contender.child, watch: contender.watch })),
+  );
 }
 
 function isAlive(pid: number | undefined): boolean {
@@ -176,11 +138,8 @@ function runContender(dataDir: string, gate: string): Contender {
     windowsHide: true,
   });
 
-  // Registered immediately: from here on, every path can await the same promise.
-  const closed = watchClose(child);
-  // A reject only surfaces on a spawn failure; mark it handled so a test that has
-  // not reached its cleanup yet cannot trip an unhandled-rejection crash.
-  closed.catch(() => undefined);
+  // Registered immediately: from here on, every path can await the same watch.
+  const watch = watchChild(child);
 
   let output = '';
   child.stdout?.setEncoding('utf8');
@@ -191,7 +150,7 @@ function runContender(dataDir: string, gate: string): Contender {
   const contender: Contender = {
     child,
     readyPath: join(dataDir, `ready-${gate}-${child.pid}`),
-    closed,
+    watch,
     output: () => output,
   };
   contenders.push(contender);
