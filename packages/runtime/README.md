@@ -1,8 +1,8 @@
 # `@soul-harness/runtime` — 认知运行时
 
 - **地位**：L3 编排层。业务逻辑在这里，不在 Daemon（[MODULES](../../docs/architecture/MODULES.md) §2–§4）。
-- **状态**：**SH-008A 已完成：ID 分配器。SH-008B 已完成：进程内 Persona 生命周期。** 事件总线、调度器、扫描 A/B、检查点装载/写出、Daemon 装配都还没有，对应 SH-008C–E。本目录没有这些能力的空类。
-- **上位文档**：[RUNTIME-LIFECYCLE](../../docs/architecture/RUNTIME-LIFECYCLE.md) §4–§5、§9，[IDENTITY-PROTOCOL](../../docs/architecture/IDENTITY-PROTOCOL.md) §3，[DATA-MODEL](../../docs/architecture/DATA-MODEL.md) §3、§6，[MODULES](../../docs/architecture/MODULES.md) §2–§3，[PLAN](../../docs/PLAN.md) §13。
+- **状态**：**SH-008A 已完成：ID 分配器。SH-008B 已完成：进程内 Persona 生命周期。SH-008C 已完成：进程内 P1 Ingress。** 调度器、扫描 A/B、检查点装载/写出、Daemon 装配都还没有，对应 SH-008D–E。本目录没有这些能力的空类。
+- **上位文档**：[RUNTIME-LIFECYCLE](../../docs/architecture/RUNTIME-LIFECYCLE.md) §4–§5、§7、§9，[IDENTITY-PROTOCOL](../../docs/architecture/IDENTITY-PROTOCOL.md) §3、§4.2、§4.5、§4.5.1，[DATA-MODEL](../../docs/architecture/DATA-MODEL.md) §3、§3.1、§6，[PLAN](../../docs/PLAN.md) §6.3，[MODULES](../../docs/architecture/MODULES.md) §2–§3。
 
 ## 1. 负责什么
 
@@ -55,12 +55,46 @@
 
 `FAILED` 可以被 `stop`（任意状态都允许停），但不能 `start` / `suspend` / `resume`。本批没有「进入 FAILED」的操作：启动路径上没有认知装载可以失败。其它 boot 留下的 `STARTING` 靠归一收到 `STOPPED`，再显式 `start`。
 
+### 1.3 进程内事件总线（SH-008C）
+
+`createStimulusIngress({ store, logger, config, now?, randomBytes?, timers?, beforePersist?, duringRead?, beforeExpire? })` 返回进程内 Ingress。没有适配器注册表，也没有鉴权。**只能被同一进程和测试调用。** SH-009 才把它挂到 loopback HTTP。
+
+配置是必填的。`queueCapacity`、`bufferTtlMs` 与 `personaAdmissionCapacity` 都必须是大于等于 1 的安全整数。`channels` 按 `source` 覆盖前两项，覆盖项自己也必须两项都合法。`personaAdmissionCapacity` 不按 source 拆。缺配置、0、负数、小数、非法 source，构造时抛 `invalid_argument`。没有「不填就无限」的默认值。
+
+在途受理有两级上限，都在进入人格队列**之前**检查。超出则 `outcome: 'backpressure'`、`reason: 'queue_overflow'`，不落库、不分配 `eventId`、不保留正文：
+
+1. **每个 source。** 同一 `personaId` 同一 `source` 上，已经通过入口、还没跑完的任务最多 `queueCapacity` 个。
+2. **整个人格。** 同一 `personaId` 上，所有 source 加在一起的在途受理最多 `personaAdmissionCapacity` 个。底层队列按人格串行，只限制单个 source 挡不住换一个合法 source 再投。
+
+另外，内存里还没过期的正文，每个 source 最多 `queueCapacity` 份。任务真正执行时若缓冲已满，信封会落成 `expired` + `queue_overflow`，结果是 `refused`。这是已经拿到队列之后的事，和上面的 `backpressure` 不是同一条路径。
+
+`acceptStimulus({ stimulus, externalSessionRef? })` 返回 Promise。参数不合法时拒绝这个 Promise，不在调用当场抛出。校验通过后会立刻深拷贝并冻结信封，再用当时的时钟写入 `receivedAt`。之后调用方改原对象，不会改排队键、去重键、落库字段或缓冲正文。`receivedAt` 是入口时间，不是任务开始执行的时间。
+
+| 步骤 | 行为 |
+|---|---|
+| 校验 | 用 contracts 的 `soul.stimulus.input.v1` 校验 `stimulus`。带 `receivedAt` 或未知顶层字段 → `schema_invalid`，不落库。通过后立刻快照 |
+| 时钟 | 入队前用可注入时钟写入 `receivedAt`，再校验 `soul.stimulus.v1`。`occurredAt` 原样保留，包括它远早于 `receivedAt` 的情况 |
+| 背压 | 该 source 的在途数达到 `queueCapacity`，或该人格全部 source 的在途数达到 `personaAdmissionCapacity` → `backpressure`，不入队 |
+| 去重 | 键是 `(personaId, adapterId, source, adapterEventRef)`，在同一次 `withRead` 里和人格行一起读。命中则返回既有 `eventId` 与 `status`，`bodyVerified` 恒为 `false`，指标 `dedupe.body_unverifiable` +1。不读正文、不写正文、不调用 `archive.compare`。`expired` / `rejected` 保持终态 |
+| 会话 | 有 `externalSessionRef` 时，复用 `(personaId, adapterId, externalSessionRef)` 上仍开着的 `sessionId`。已关闭的不复活，另分配新 id。没有这个字段则 `sessionId` 为 null |
+| 落库 | 未命中时分配 `eventId`（占用则重试；唯一约束冲突再读去重键，命中则按上面的幂等返回）。短事务里先写 `received`，同一提交进入 `accepted`（`archive_state='none'`、`disposition` 与 `archive_ref` 皆 NULL）。缓冲已满则同一提交进入 `expired` + `queue_overflow`，结果是 `refused` |
+| ACK | 事务提交之后才返回，而且返回值跟库里的行一致。提交之后的时钟或登记异常不会把这次调用变成 rejected Promise。若提交前 TTL 已经过了，正文不进缓冲，行收成 `expired` + `ttl_expired`，结果是 `outcome: 'expired'`。定时器登记或重注册失败同样不留正文，并收成 `rejected` + `processing_failed`。`buffer_lost` 仍只属于崩溃恢复，本批不用。收口写库或时钟失败时，行保持库里的 `accepted`，事件 id 进入不含正文的重试名单，返回值也是 `accepted` |
+| TTL | `readBuffered` 自己看时钟。`expiresAt <= now` 时先从内存删掉正文并返回 `null`，然后再尝试把活跃行收成 `ttl_expired`。数据库写失败不会把正文放回去；失败记 `ingress.ttl_persist_failed`，事件 id 留在不含正文的重试名单里，之后的 `evictExpired` 或同人格的下一次受理会再写元数据。已经是终态的行不改。`close()` 取消定时器并丢掉缓冲 |
+
+`accepted` 只表示信封已经落库。`audited` 恒为 `false`。本批不会把事件推进到 `noticed` / `understood` / `response_committed` / `acted`。
+
+同一 `personaId` 的受理和 TTL 收口进同一条内存队列。别的人格不用这条队列，缓冲也不交叉。`readBuffered(personaId, eventId)` 用错人格，或正文已经过了 `expiresAt`，得到 `null`。
+
+诊断日志走 `safeLog`。日志实现抛错不会改掉已提交的受理、幂等命中或校验错误。日志字段只有 id、adapter、source、状态和指标名，没有正文。幂等命中的日志写 `bodyVerified: false`，不把它说成内容已经核对过。
+
+`externalSessionRef` 会写入 `sessions.external_id`。它是适配器自己的会话键，长度 1..256，不能含空白或控制字符。不要把消息正文放进去。
+
 ## 2. 不负责什么
 
 1. **不接受外部指定的内部 ID。** 没有把调用方字符串收成 `PersonaId` 的函数。`createPersona` 的多余字段会被忽略。
 2. **不在本包写 SQL，不做 snake_case 映射，不读环境变量。** 权威写入只经过 `@soul-harness/persistence`。
 3. **不创建会话、思维、动作或冲突记录。** `allocateThreadId` / `allocateActionId` / `allocateConflictRecordId` 只产生符合格式的字符串。
-4. **不实现** 事件总线、调度器、扫描 A/B、检查点装载/写出、Daemon 生命周期。入口不导出 `createRuntime`、`acceptStimulus`、`enqueueTask`、`recover`、`checkpointAll`。
+4. **不实现** 调度器、扫描 A/B、检查点装载/写出、Daemon 生命周期、HTTP。入口不导出 `createRuntime`、`enqueueTask`、`recover`、`checkpointAll`。`acceptStimulus` 不是自由函数，只在 `createStimulusIngress` 返回的对象上。
 5. **不提升 epoch，不分配 `bootId`。**
 6. **不保存历史 run。** OPEN-1 已决定：P1 不建 `runs` 表。
 7. **不声称 H12 整条通过。** 本批只保证人格级写队列和状态行互不覆盖。记忆、激活、授权不在这里。
@@ -91,19 +125,22 @@ packages/runtime/
 │  ├─ index.ts                      # 唯一公共入口
 │  ├─ errors.ts                     # RuntimeError
 │  ├─ ids/{encode,allocate}.ts      # 冻结编码与分配
-│  └─ persona/{lifecycle,queue}.ts  # 状态机与人格级写队列
-└─ test/                            # 52 项
+│  ├─ persona/{lifecycle,queue}.ts  # 状态机与人格级写队列
+│  └─ events/{schema,buffer,bus}.ts # P1 校验、TTL 缓冲、进程内 Ingress
+└─ test/                            # 85 项
    ├─ allocator.test.ts             # 29 项。向量、时钟、碰撞、SQLite 主键
    ├─ allocator-sample.test.ts      # 2 项。OPEN-7 大样本
-   └─ persona-lifecycle.test.ts     # 21 项。真实 SQLite 上的生命周期
+   ├─ persona-lifecycle.test.ts     # 21 项。真实 SQLite 上的生命周期
+   └─ ingress.test.ts               # 33 项。真实 SQLite 上的 P1 Ingress
 ```
 
 ## 5. 依赖
 
 | 方向 | 包 | 本批实际情况 |
 |---|---|---|
-| 允许依赖 | `contracts` | **已依赖**。格式校验与字母表只引用 contracts，不在这里复制正则 |
+| 允许依赖 | `contracts` | **已依赖**。格式校验、字母表和两份 Stimulus Schema 只引用 contracts，不在这里复制正则 |
 | 允许依赖 | `persistence` | **已依赖**。只调用仓储与 `withRead`。`src/` 不导入 `node:sqlite`，也不拼 SQL |
+| 校验器 | `ajv` | **已依赖**。只用来执行 contracts 导出的两份 Schema。校验失败对象会立刻丢掉，避免留住正文 |
 | 被谁依赖 | 仅 apps | **还没有。** `soul-daemon` 未装配本包 |
 
 `contracts` / `persistence` 不得依赖本包。
@@ -143,7 +180,22 @@ restorePersona(personaId): PersonaSnapshot
 normalizeCrashedPersonas(): Promise<readonly PersonaSnapshot[]>
 ```
 
-错误码：`invalid_argument` / `invalid_clock` / `invalid_entropy` / `id_collision` / `id_encoding` / `not_found` / `illegal_transition` / `version_conflict`。消息不回显时钟、熵、候选 ID 或 display name。存储层的 `store_closed` 等错误原样抛出，不包装成 RuntimeError（唯一约束除外，包装成 `id_collision`）。
+Ingress（写操作和 `evictExpired` 返回 Promise；参数错误拒绝该 Promise。`readBuffered` / `listQueued` / `metrics` / `close` 是同步的）：
+
+```ts
+createStimulusIngress(options): StimulusIngress
+
+acceptStimulus({ stimulus, externalSessionRef? }): Promise<IngressResult>
+readBuffered(personaId, eventId): BufferedStimulus | null
+listQueued(personaId): readonly QueuedStimulus[]
+evictExpired(): Promise<readonly TtlClose[]>
+close(): void
+metrics(): { 'dedupe.body_unverifiable': number }
+```
+
+`IngressResult` 是 `accepted`（`audited: false`）、`duplicate`（`bodyVerified: false`，状态可以是终态）、`expired`（提交后、ACK 前已经收成 `ttl_expired`）、`rejected`（缓冲没能留下，收成 `processing_failed`）、`refused`（缓冲已满，已落成 `expired` + `queue_overflow`）或 `backpressure`（在途受理已满，未入队、未落库）。没有 HTTP 状态码。`buffer_lost` 的定义仍以 DATA-MODEL 为准，只用于崩溃或重启后的恢复扫描。
+
+错误码：`invalid_argument` / `invalid_clock` / `invalid_entropy` / `id_collision` / `id_encoding` / `not_found` / `illegal_transition` / `version_conflict` / `schema_invalid` / `closed`。消息不回显时钟、熵、候选 ID、display name 或刺激正文。存储层的 `store_closed` 等错误原样抛出，不包装成 RuntimeError（创建人格时的唯一约束除外，包装成 `id_collision`；Ingress 在去重键冲突时改走幂等返回）。
 
 ## 7. 测试
 
@@ -152,10 +204,11 @@ normalizeCrashedPersonas(): Promise<readonly PersonaSnapshot[]>
 | `test/allocator.test.ts` | 29 项。已知向量、前缀不可混用、时钟进退、碰撞重试、真实 SQLite 主键冲突不覆盖、`src/` 无 SQL / 无环境读取，且只依赖 contracts 与 persistence |
 | `test/allocator-sample.test.ts` | 2 项。每个前缀 10000 个 ID，另加同毫秒突发 10000 个；全部通过 contracts 的 `is*` / `parse*`，样本内唯一 |
 | `test/persona-lifecycle.test.ts` | 21 项。真实迁移后的 SQLite：合法与非法转移、任意状态 stop、按 boot 区分的崩溃归一、按 ID 恢复且不新建、多人格隔离、同人格并发、过期 version 不覆盖、epoch 不变、检查点不被生命周期写掉、分页列表、日志失败不掩盖提交、双连接读快照、非法参数拒绝 Promise |
+| `test/ingress.test.ts` | 33 项。真实 SQLite：信封正反例与注入时钟、去重不插第二行且不声称正文一致、终态不重开、唯一约束冲突后的幂等收敛、会话复用与关闭后新建、金丝雀正文只活在 TTL 缓冲里、source 与人格两级在途上限、入队前背压、过期正文不可读、受理期间 TTL 到期时返回值与库一致、提交后时钟抛错仍返回已提交状态并进入无正文收口队列、TTL 元数据失败后的重试且时钟抛错不产生未处理 rejection、定时器登记失败与提前触发后重注册失败都收成 `processing_failed`、快照不被事后篡改、`receivedAt` 取入口时间、人格与 source 隔离、同人格串行、日志失败不掩盖结果、非法配置与非法参数拒绝 Promise |
 
 OPEN-7 的样本量就是那两个 **10000**。不把「统计上永不碰撞」写成验收。
 
-`tools/consumer-check` 以包名导入 `createPersonaLifecycle`，在构建产物上跑通创建、启停、挂起、恢复和非法转移，并确认 `acceptStimulus` 等尚未导出。
+`tools/consumer-check` 以包名导入 `createPersonaLifecycle` 与 `createStimulusIngress`，在构建产物上跑通人格生命周期和一次受理 / 去重，并确认 `createRuntime`、`enqueueTask`、`recover`、`checkpointAll` 尚未导出。
 
 ## 8. 已知限制
 
@@ -165,4 +218,8 @@ OPEN-7 的样本量就是那两个 **10000**。不把「统计上永不碰撞」
 4. 本包被构建、被测试，**不表示** Daemon 已经在恢复人格或受理事件。`normalizeCrashedPersonas` 不会自己在进程启动时跑。调用它的独占 `RECOVERING` 顺序属于 SH-008E。
 5. 读操作不进写队列，因此可能看见 `STARTING` / `STOPPING` 这两个已经提交的中间态。
 6. 已经 `STOPPED` 的 `stop` 不会顺便修理一张和人格行不一致的 `runtime_state`。正常路径的写入是一起提交的。
-7. 没有事件受理、任务调度、扫描 A/B、检查点编排，也没有 HTTP。
+7. 没有任务调度、扫描 A/B、检查点编排，也没有 HTTP。P1 的 `accepted` 不是审计，也不是已经理解。进程重启后内存缓冲不在；把因此丢失的活跃事件收成 `buffer_lost` 属于 SH-008E。
+8. 在途上限和正文缓冲都记在本 Ingress 实例的内存里。两个 Ingress 共用一个库时，容量不会加总；生产部署是一个 Daemon、一个 Ingress。入队前的 `backpressure` 不会写成事件行。`personaAdmissionCapacity` 管的是在途受理，不管已经落库的正文份数。
+9. 正文过期或缓冲登记失败都不依赖「先把库写成功」。元数据写失败时，正文已经不可读；只把 `eventId` 和原因码留在重试名单里，自动定时重试最多 3 次，之后靠 `evictExpired` 或同人格的下一次受理补写。重试回调里的异常会被接住，不会变成未处理的 rejection。提交已经成功之后，时钟再抛错也不会把这次调用变成失败。`close()` 会再试一次然后丢掉这份名单。进程退出后仍是 `accepted` 的行，要等 SH-008E 按 `buffer_lost` 收口。本批运行期不用 `buffer_lost`；缓冲没能留下时用 `rejected` + `processing_failed`。
+10. `externalSessionRef` 会进 `sessions.external_id`。金丝雀测试覆盖的是刺激正文，不是这个适配器会话键。
+11. 跨多个 source 的已受理缓冲总条数、总字节数和单条载荷上限留到 SH-010 做插件接入安全验收。本批不引入插件注册表。
