@@ -1,7 +1,7 @@
 # IDENTITY-PROTOCOL — 六类核心身份协议
 
 - **地位**：身份语义的唯一权威描述。与 `OVERVIEW.md` §5 的概览表冲突时，以本文为准。
-- **状态**：**协议定义中。尚未实现，未经过运行测试。**
+- **状态**：**协议已冻结。** 格式校验已在 SH-004（`packages/contracts`）落地。ID 分配器已在 SH-008A（`packages/runtime`）实现并通过测试。Ingress、调度、动作身份的运行时路径，以及 §12 里未写明完成的验收项，仍未实现。
 - **上位决策**：`ADR-001`（独立运行时 / camelCase 线协议 / snake_case 数据库 / persistence 负责映射）
 - **配套**：`DATA-MODEL.md`（列与约束）、`RUNTIME-LIFECYCLE.md`（状态机）、`TRUST-BOUNDARIES.md`（权限域）
 
@@ -465,26 +465,33 @@ CREATE UNIQUE INDEX ux_sessions_external
 | `adapterEventRef` 被适配器**错误复用**（不同内容） | 与归档冲突同路：拒绝并报冲突，不静默接受 |
 | 迁移旧库 | 旧 `events.id`（旧格式）→ 需重新生成 `evt_` 并建立 `adapter_event_ref` 映射（P9） |
 
-## 11. OPEN（尚未决定，含最迟决策阶段）
+## 11. OPEN
+
+### 11.1 已决定
+
+| # | 原问题 | 决定 | 日期 |
+|---|---|---|---|
+| OPEN-1 | `runId` 是否需要独立 `runs` 表保存全部历史尝试。当时只存 `tasks.run_id`（当前尝试），历史尝试会丢，影响计费与复盘。最迟决策点曾写成「P1 建表前」；`0001_init_core.sql` 落地时没有 `runs` 表，本项补记该决定 | **P1 不新增 `runs` 表，也不做 `0002` 迁移。** 权威状态只保留 `tasks.run_id` 上的当前尝试。被放弃的 run 不恢复（§6）；历史尝试用结构化日志中的 `runId` 追溯。计费与复盘若以后需要运行史，以追加表加 ADR 引入，不改变 `tasks.id` 的语义 | **2026-11-20（UTC+8）** |
+| OPEN-7 | ID 生成器是否需要在 CI 做碰撞与大样本格式测试。属测试设计，非协议本身。最迟决策点是 P1 实现分配器时 | **要做**，作为 SH-008A 的验收，随 `pnpm test` 进入 CI。样本量：**每个可分配前缀 10000 个 ID**，另加**同毫秒突发 10000 个**。测试：`packages/runtime/test/allocator-sample.test.ts`（格式与样本内唯一）、`packages/runtime/test/allocator.test.ts`（时间前缀、碰撞重试、真实 SQLite 主键不覆盖）。不把统计意义上的全局永不碰撞当作验收；唯一性仍是单部署内，外加冲突重试（§3.3） | **2026-11-20（UTC+8）** |
+
+### 11.2 尚未决定（含最迟决策阶段）
 
 | # | 问题 | 原因 | 最迟决策阶段 |
 |---|---|---|---|
-| OPEN-1 | `runId` 是否需要独立 `runs` 表保存全部历史尝试 | 现在只存 `tasks.run_id`（当前尝试），历史尝试会丢；影响计费与复盘 | **P1 建表前** |
 | OPEN-2 | 会话空闲多久自动关闭（`closed_at` 置位阈值） | §4.2 已定"首事件自动创建"，但自动关闭阈值未定；影响空会话治理与会话数膨胀 | **P2 事件接入前** |
 | OPEN-3 | 跨部署导入时的 ID 重映射规则 | 唯一性只在单部署内保证 | **P9 迁移前** |
 | OPEN-4 | `adapterEventRef` 的保留期（适配器多久内可重试） | 与事件保留策略耦合 | **P8 前** |
 | OPEN-5 | 模型是否可见 `threadId` / `actionId` | 影响可解释性与越权风险（当前定为不可见） | **P5 自主认知前** |
 | OPEN-6 | 旧库 `sessions`/`events` 的 ID 迁移映射细则 | 旧 ID 非 `evt_` 格式 | **P9 迁移前** |
-| OPEN-7 | ID 生成器是否需要在 CI 做碰撞与大样本格式测试 | 属测试设计，非协议本身 | **P1 实现时** |
 | OPEN-8 | `archiveRef` 的具体生成算法，以及是否直接复用 `eventId` | P1 恒为 NULL、`archive_records` 未创建；只影响 P8 的归档实现，不影响契约形状（已定为 1–128 不透明 token） | **P8 建表前** |
 
 ## 12. 验收表
 
-> 本文档为**协议定义**，下列各项为**待实现后的验收条件**，不是当前通过状态。
+> 下表区分协议验收与当前实现。未写明完成的项仍然**未实现**。写成「部分」或「分配器已测」的，只覆盖注明的那一层。
 
 | ID | 验收项 | 状态 |
 |---|---|---|
-| I01 | 六类 ID 格式符合 §3.1 正则，长度恒为 30 | 未实现 |
+| I01 | 六类 ID 格式符合 §3.1 正则，长度恒为 30 | **分配器已测（SH-008A）**：`packages/runtime` 生成的六类 ID 在 CI 中每前缀 10000 个全部通过 contracts 的 `is*` / `parse*`，长度恒为 30。格式正则本身在 SH-004 已有测试 |
 | I02 | 所有 ID 由 Harness 生成；Adapter 提交内部 ID 一律拒绝 | 未实现 |
 | I03 | 相同 `(personaId, adapterId, source, adapterEventRef)` 重投返回同一 `eventId` | 未实现 |
 | I04 | 不同 Adapter 或不同 persona 使用相同 `adapterEventRef` 不冲突 | 未实现 |
@@ -494,8 +501,8 @@ CREATE UNIQUE INDEX ux_sessions_external
 | I08 | 崩溃恢复后 `executing` 动作不因重启被标记成功 | 未实现 |
 | I09 | 任何记录都可凭 `personaId` 隔离查询，不串人格 | 未实现 |
 | I10 | `requestNonce` 与 `eventId` 在任何路径上不可互换 | 未实现 |
-| I11 | ID 中不含可推断内容的信息（仅时间前缀） | 未实现 |
-| I12 | 数据库唯一索引能捕获生成器碰撞并报错而非覆盖 | 未实现 |
+| I11 | ID 中不含可推断内容的信息（仅时间前缀） | **分配器已满足（SH-008A）**：分配函数不接收内容参数；主体只有 10 字符时间前缀和 16 字符随机段 |
+| I12 | 数据库唯一索引能捕获生成器碰撞并报错而非覆盖 | **部分（SH-008A）**：占用时重试，预算耗尽报 `id_collision`，不返回已占用 ID。`packages/runtime/test/allocator.test.ts` 用真实 SQLite 主键证明冲突行不被覆盖。业务写入路径尚未改用该分配器 |
 | I13 | `required` 事件同键异内容能被 `archive.compare` 判为 `conflict` | 未实现 |
 | I14 | `excluded` / P1 下同键异内容**不被谎报为已识别**（只幂等命中） | 未实现 |
 | I15 | 审计表（`archive_decisions` / `archive_conflict_records`）均带 `persona_id`，可按人格隔离查询 | 未实现 |
@@ -506,4 +513,4 @@ CREATE UNIQUE INDEX ux_sessions_external
 
 ---
 
-**本文档不表示任何实现已完成。** 六类身份的代码、Schema 与测试属 SH-004 及后续阶段。
+**除文中明确写成已实现的部分（SH-004 的格式与 Schema、SH-008A 的分配器）外，本文档不表示身份协议的运行时行为已经完成。**

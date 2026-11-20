@@ -23,9 +23,11 @@ import {
   STIMULUS_INPUT_VERSION,
   isCoreId,
   isPersonaId,
+  isTaskId,
   stimulusInputV1Schema,
 } from '@soul-harness/contracts';
 import * as persistence from '@soul-harness/persistence';
+import * as runtime from '@soul-harness/runtime';
 
 assert.equal(SCHEMA_IDS.length, 10, 'expected 10 registered schemas');
 assert.equal(STIMULUS_INPUT_VERSION, 'soul.stimulus.input.v1');
@@ -109,6 +111,61 @@ try {
   rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
+// --- runtime: the built entry allocates ids and does not pretend to run ------
+
+for (const absent of [
+  'createRuntime',
+  'acceptStimulus',
+  'enqueueTask',
+  'recover',
+  'checkpointAll',
+]) {
+  assert.equal(absent in runtime, false, `${absent} must not be exported by SH-008A`);
+}
+
+const allocated = runtime.allocatePersonaId();
+assert.equal(typeof allocated, 'string');
+assert.equal(allocated.length, 30);
+assert.equal(isPersonaId(allocated), true);
+assert.equal(isCoreId(runtime.allocateTaskId()), false);
+assert.equal(isTaskId(runtime.allocateTaskId()), true);
+assert.equal(runtime.ID_ALLOCATION_MAX_ATTEMPTS, 8);
+assert.equal(runtime.ID_ENTROPY_BYTES, 10);
+
+const fixed = runtime.allocateEventId({
+  now: () => 0,
+  randomBytes: () => new Uint8Array(10),
+});
+assert.equal(fixed, `evt_${'0'.repeat(26)}`);
+
+let occupied = true;
+const retried = runtime.allocateEventId({
+  now: () => 0,
+  randomBytes: () => {
+    const bytes = new Uint8Array(10);
+    bytes[0] = occupied ? 1 : 2;
+    return bytes;
+  },
+  isOccupied: () => {
+    const taken = occupied;
+    occupied = false;
+    return taken;
+  },
+});
+assert.notEqual(retried, fixed);
+assert.equal(isCoreId(retried), true);
+
+assert.throws(
+  () =>
+    runtime.allocateRunId({
+      now: () => 0,
+      randomBytes: () => new Uint8Array(10),
+      isOccupied: () => true,
+      maxAttempts: 2,
+    }),
+  (error) => runtime.isRuntimeError(error) && error.code === 'id_collision',
+);
+
 console.log(
-  `consumer-check ok: package-name imports resolved, ${SCHEMA_IDS.length} schemas, persistence E2E ok`,
+  `consumer-check ok: package-name imports resolved, ${SCHEMA_IDS.length} schemas, persistence E2E ok, runtime allocator ok`,
 );
