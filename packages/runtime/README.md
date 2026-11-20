@@ -22,17 +22,17 @@
 2. `crypto.randomBytes(10)`（80 bit）编成 16 个字符。
 3. 加前缀。总长 30。字母表与 `contracts` 的 `ID_ALPHABET` 是同一份，排除 `I L O U`，只输出大写。
 
-碰撞：调用方用 `isOccupied` 告诉分配器「这个 ID 已经被占」。分配器换一对新的时间戳和熵再试。默认最多 **8** 次（`ID_ALLOCATION_MAX_ATTEMPTS`）；显式预算是 `1..128`。耗尽抛 `id_collision`，**不返回已占用的 ID，也不写库**。数据库主键 / 唯一索引仍是最终防线（§3.3）。创建人格时，占用谓词就是 `personas.getById`；插入若仍撞上唯一约束，创建失败为 `id_collision`，不覆盖已有行。
+碰撞：调用方用 `isOccupied` 告诉分配器「这个 ID 已经被占」。分配器换一对新的时间戳和熵再试。默认最多 **8** 次（`ID_ALLOCATION_MAX_ATTEMPTS`）；显式预算是 `1..128`。耗尽抛 `id_collision`，**不返回已占用的 ID，也不写库**。数据库主键 / 唯一索引仍是最终防线（§3.3）。创建人格时，占用谓词就是 `personas.getById`。预检查通过之后、插入之前若有别人写入同一个 id，插入得到 `unique_conflict`，创建路径按**同一个**上限重新分配再插入。这 8 次都撞上唯一约束才抛 `id_collision`。不是唯一约束的错误不重试，原样抛出。两种失败都不覆盖已有行，失败的那次插入也不会留下 `personas` 或 `runtime_state`。
 
 时钟默认 `Date.now`，熵默认 `node:crypto`。两者都可以注入，供测试锁住时间前缀。没有 `isOccupied` 时只取一次，不空转。
 
 ### 1.2 Persona 生命周期（SH-008B）
 
-`createPersonaLifecycle({ store, logger, bootId, now?, randomBytes?, beforeCommit? })` 返回进程内生命周期。`bootId` 由调用方提供（协议 §3.4：Daemon 每进程一个），本包不另造一个。
+`createPersonaLifecycle({ store, logger, bootId, now?, randomBytes?, beforeInsert?, beforeCommit?, duringRead? })` 返回进程内生命周期。`bootId` 由调用方提供（协议 §3.4：Daemon 每进程一个），本包不另造一个。
 
 | 操作 | 行为 |
 |---|---|
-| `createPersona({ displayName })` | 分配 `personaId`，插入 `CREATED`，并在同一事务写入 `runtime_state`（epoch 为表默认值 1，version 为 0）。不接受调用方传入的 id |
+| `createPersona({ displayName })` | 分配 `personaId`，插入 `CREATED`，并在同一事务写入 `runtime_state`（epoch 为表默认值 1，version 为 0）。预检查或插入撞上已有 id 时换一个新 id 再试，上限是分配器的 `ID_ALLOCATION_MAX_ATTEMPTS`。不接受调用方传入的 id |
 | `getPersona` / `listPersonas` / `queryPersonas({ state? })` | 读取。列表按主键升序走 `listPage`，把每一页拼起来，避免 500 行上限把后面的人格截掉 |
 | `startPersona` | 仅 `CREATED` 或 `STOPPED`。先提交 `STARTING`（写入当前 `bootId`），再提交 `RUNNING`。中间态会落库 |
 | `suspendPersona` / `resumePersona` | 仅 `RUNNING` → `SUSPENDED`，以及 `SUSPENDED` → `RUNNING`。恢复时盖上当前 `bootId` |
@@ -113,6 +113,8 @@
 
 `displayName` 长度 1..128（`PERSONA_DISPLAY_NAME_MAX_LENGTH`）、拒绝首尾空白和控制字符，是本批的入口限制。表本身没有这个 CHECK。
 
+`beforeInsert` 是测试缝，生产调用省略。它在候选 id 已经通过占用预检查、`insertWithRuntimeState` 还没开始时运行；返回的 Promise 会在创建队列里被等待。另一个连接可以在这里提交同一个 id，让接下来的插入撞上真实的唯一约束。
+
 `beforeCommit` 是测试缝，生产调用省略。它在判定合法之后、条件写之前运行；返回的 Promise 会在队列里被等待，用来观察 `version_conflict`。
 
 `duringRead` 也是测试缝。它在同一次读事务里、人格行已经读出、`runtime_state` 尚未读出时运行，用来让另一个连接在中间提交。
@@ -127,10 +129,10 @@ packages/runtime/
 │  ├─ ids/{encode,allocate}.ts      # 冻结编码与分配
 │  ├─ persona/{lifecycle,queue}.ts  # 状态机与人格级写队列
 │  └─ events/{schema,buffer,bus}.ts # P1 校验、TTL 缓冲、进程内 Ingress
-└─ test/                            # 85 项
+└─ test/                            # 88 项
    ├─ allocator.test.ts             # 29 项。向量、时钟、碰撞、SQLite 主键
    ├─ allocator-sample.test.ts      # 2 项。OPEN-7 大样本
-   ├─ persona-lifecycle.test.ts     # 21 项。真实 SQLite 上的生命周期
+   ├─ persona-lifecycle.test.ts     # 24 项。真实 SQLite 上的生命周期
    └─ ingress.test.ts               # 33 项。真实 SQLite 上的 P1 Ingress
 ```
 
@@ -195,7 +197,7 @@ metrics(): { 'dedupe.body_unverifiable': number }
 
 `IngressResult` 是 `accepted`（`audited: false`）、`duplicate`（`bodyVerified: false`，状态可以是终态）、`expired`（提交后、ACK 前已经收成 `ttl_expired`）、`rejected`（缓冲没能留下，收成 `processing_failed`）、`refused`（缓冲已满，已落成 `expired` + `queue_overflow`）或 `backpressure`（在途受理已满，未入队、未落库）。没有 HTTP 状态码。`buffer_lost` 的定义仍以 DATA-MODEL 为准，只用于崩溃或重启后的恢复扫描。
 
-错误码：`invalid_argument` / `invalid_clock` / `invalid_entropy` / `id_collision` / `id_encoding` / `not_found` / `illegal_transition` / `version_conflict` / `schema_invalid` / `closed`。消息不回显时钟、熵、候选 ID、display name 或刺激正文。存储层的 `store_closed` 等错误原样抛出，不包装成 RuntimeError（创建人格时的唯一约束除外，包装成 `id_collision`；Ingress 在去重键冲突时改走幂等返回）。
+错误码：`invalid_argument` / `invalid_clock` / `invalid_entropy` / `id_collision` / `id_encoding` / `not_found` / `illegal_transition` / `version_conflict` / `schema_invalid` / `closed`。消息不回显时钟、熵、候选 ID、display name 或刺激正文。存储层的 `store_closed` 等错误原样抛出，不包装成 RuntimeError（创建人格时只有唯一约束会按分配器上限重试，耗尽才包装成 `id_collision`；Ingress 在去重键冲突时改走幂等返回）。
 
 ## 7. 测试
 
@@ -203,7 +205,7 @@ metrics(): { 'dedupe.body_unverifiable': number }
 |---|---|
 | `test/allocator.test.ts` | 29 项。已知向量、前缀不可混用、时钟进退、碰撞重试、真实 SQLite 主键冲突不覆盖、`src/` 无 SQL / 无环境读取，且只依赖 contracts 与 persistence |
 | `test/allocator-sample.test.ts` | 2 项。每个前缀 10000 个 ID，另加同毫秒突发 10000 个；全部通过 contracts 的 `is*` / `parse*`，样本内唯一 |
-| `test/persona-lifecycle.test.ts` | 21 项。真实迁移后的 SQLite：合法与非法转移、任意状态 stop、按 boot 区分的崩溃归一、按 ID 恢复且不新建、多人格隔离、同人格并发、过期 version 不覆盖、epoch 不变、检查点不被生命周期写掉、分页列表、日志失败不掩盖提交、双连接读快照、非法参数拒绝 Promise |
+| `test/persona-lifecycle.test.ts` | 24 项。真实迁移后的 SQLite：合法与非法转移、任意状态 stop、按 boot 区分的崩溃归一、按 ID 恢复且不新建、多人格隔离、同人格并发、过期 version 不覆盖、epoch 不变、检查点不被生命周期写掉、分页列表、日志失败不掩盖提交、双连接读快照、非法参数拒绝 Promise。创建路径另含：预检查发现 id 已占用时换号、插入撞上真实主键冲突时换号且不留下半截行、重试耗尽返回 `id_collision`、非唯一约束错误原样抛出 |
 | `test/ingress.test.ts` | 33 项。真实 SQLite：信封正反例与注入时钟、去重不插第二行且不声称正文一致、终态不重开、唯一约束冲突后的幂等收敛、会话复用与关闭后新建、金丝雀正文只活在 TTL 缓冲里、source 与人格两级在途上限、入队前背压、过期正文不可读、受理期间 TTL 到期时返回值与库一致、提交后时钟抛错仍返回已提交状态并进入无正文收口队列、TTL 元数据失败后的重试且时钟抛错不产生未处理 rejection、定时器登记失败与提前触发后重注册失败都收成 `processing_failed`、快照不被事后篡改、`receivedAt` 取入口时间、人格与 source 隔离、同人格串行、日志失败不掩盖结果、非法配置与非法参数拒绝 Promise |
 
 OPEN-7 的样本量就是那两个 **10000**。不把「统计上永不碰撞」写成验收。
@@ -213,7 +215,7 @@ OPEN-7 的样本量就是那两个 **10000**。不把「统计上永不碰撞」
 ## 8. 已知限制
 
 1. 分配 `runId` 不会把历史尝试写入 `runs` 表——P1 没有这张表（OPEN-1，2026-11-20）。
-2. 占用检测在创建人格时接的是 `getById`。分配器自己看不到唯一索引；索引冲突变成 `id_collision`。
+2. 占用检测在创建人格时接的是 `getById`。分配器自己看不到唯一索引。索引冲突按 `ID_ALLOCATION_MAX_ATTEMPTS` 重新抽 id，耗尽才是 `id_collision`。其它数据库错误不走这条重试。
 3. 重试上限 8 是 SH-008A 的实现选择，不是协议里的新常数。
 4. 本包被构建、被测试，**不表示** Daemon 已经在恢复人格或受理事件。`normalizeCrashedPersonas` 不会自己在进程启动时跑。调用它的独占 `RECOVERING` 顺序属于 SH-008E。
 5. 读操作不进写队列，因此可能看见 `STARTING` / `STOPPING` 这两个已经提交的中间态。

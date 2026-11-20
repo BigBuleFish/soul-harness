@@ -15,6 +15,7 @@ import type { BootId, PersonaId } from '@soul-harness/contracts';
 import { isPersonaId } from '@soul-harness/contracts';
 import {
   createRepositories,
+  isPersistenceError,
   migrate,
   openStore,
   withWrite,
@@ -24,6 +25,7 @@ import type { PersonaState } from '@soul-harness/persistence';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  ID_ALLOCATION_MAX_ATTEMPTS,
   ID_ENTROPY_BYTES,
   PERSONA_DISPLAY_NAME_MAX_LENGTH,
   RuntimeError,
@@ -229,9 +231,206 @@ describe('persona lifecycle — create, query, restore', () => {
       displayName: 'Fresh',
       ...({ id: taken } as object),
     } as { displayName: string });
-    expect(created.id).not.toBe(taken);
+    const fresh = allocatePersonaId({ now, randomBytes: () => fill(2) });
+    expect(created.id).toBe(fresh);
     expect(isPersonaId(created.id)).toBe(true);
+    const stored = reposOf(fixture.store);
+    expect(stored.personas.getById(taken)).toMatchObject({
+      displayName: 'Occupied',
+      state: 'CREATED',
+    });
+    expect(stored.runtimeState.get(taken)).toBeNull();
+    expect(stored.personas.getById(fresh)?.displayName).toBe('Fresh');
+    expect(stored.runtimeState.get(fresh)).toMatchObject({ state: 'CREATED', epoch: 1 });
     expect(life.listPersonas()).toHaveLength(2);
+  });
+
+  it('retries when the insert loses the id after the pre-check passed', async () => {
+    const fixture = openFixture();
+    const now = () => 1_700_000_000_000;
+    const taken = allocatePersonaId({ now, randomBytes: () => fill(1) });
+    const fresh = allocatePersonaId({ now, randomBytes: () => fill(2) });
+    const other = openStore({ file: fixture.store.file });
+    let draws = 0;
+    try {
+      const life = createPersonaLifecycle({
+        store: fixture.store,
+        logger: fixture.logger,
+        bootId: BOOT_A,
+        now,
+        randomBytes: () => {
+          draws += 1;
+          return fill(draws);
+        },
+        beforeInsert: (id) => {
+          if (id !== taken) {
+            return;
+          }
+          reposOf(other).personas.insert({
+            id,
+            displayName: 'Racer',
+            state: 'CREATED',
+            createdAt: 1,
+            updatedAt: 1,
+          });
+        },
+      });
+
+      const created = await life.createPersona({ displayName: CANARY });
+
+      expect(draws).toBe(2);
+      expect(created.id).toBe(fresh);
+      expect(created).toMatchObject({
+        displayName: CANARY,
+        state: 'CREATED',
+        version: 0,
+        epoch: 1,
+        bootId: null,
+        runtimeState: { state: 'CREATED', epoch: 1, bootId: null },
+      });
+      const stored = reposOf(fixture.store);
+      expect(stored.personas.getById(taken)).toMatchObject({
+        displayName: 'Racer',
+        state: 'CREATED',
+      });
+      expect(stored.runtimeState.get(taken)).toBeNull();
+      expect(stored.personas.getById(fresh)?.displayName).toBe(CANARY);
+      expect(stored.runtimeState.get(fresh)).toMatchObject({ state: 'CREATED', epoch: 1 });
+      expect(stored.personas.list()).toHaveLength(2);
+      assertNoCanary(fixture);
+    } finally {
+      other.close();
+    }
+  });
+
+  it('returns id_collision when every insert attempt loses the race', async () => {
+    const fixture = openFixture();
+    const now = () => 1_700_000_000_000;
+    const other = openStore({ file: fixture.store.file });
+    const raced: PersonaId[] = [];
+    let draws = 0;
+    try {
+      const life = createPersonaLifecycle({
+        store: fixture.store,
+        logger: fixture.logger,
+        bootId: BOOT_A,
+        now,
+        randomBytes: () => {
+          draws += 1;
+          return fill(draws);
+        },
+        beforeInsert: (id) => {
+          raced.push(id);
+          reposOf(other).personas.insert({
+            id,
+            displayName: 'Racer',
+            state: 'CREATED',
+            createdAt: 1,
+            updatedAt: 1,
+          });
+        },
+      });
+
+      let thrown: unknown;
+      try {
+        await life.createPersona({ displayName: CANARY });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(isRuntimeError(thrown)).toBe(true);
+      if (!isRuntimeError(thrown)) {
+        throw new Error('expected id_collision');
+      }
+      expect(thrown.code).toBe('id_collision');
+      expect(thrown.details).toEqual({
+        prefix: 'psn',
+        attempts: ID_ALLOCATION_MAX_ATTEMPTS,
+      });
+      expect(isPersistenceError(thrown.cause) && thrown.cause.code).toBe('unique_conflict');
+      expect(thrown.message.includes(CANARY)).toBe(false);
+      expect(draws).toBe(ID_ALLOCATION_MAX_ATTEMPTS);
+      expect(raced).toHaveLength(ID_ALLOCATION_MAX_ATTEMPTS);
+      expect(new Set(raced).size).toBe(ID_ALLOCATION_MAX_ATTEMPTS);
+      for (const id of raced) {
+        expect(thrown.message.includes(id)).toBe(false);
+      }
+
+      const stored = reposOf(fixture.store);
+      expect(stored.personas.list()).toHaveLength(ID_ALLOCATION_MAX_ATTEMPTS);
+      for (const id of raced) {
+        expect(stored.personas.getById(id)).toMatchObject({ displayName: 'Racer' });
+        expect(stored.runtimeState.get(id)).toBeNull();
+      }
+      const listed = life.listPersonas();
+      expect(listed).toHaveLength(ID_ALLOCATION_MAX_ATTEMPTS);
+      for (const row of listed) {
+        expect(row.displayName).toBe('Racer');
+        expect(row.runtimeState).toBeNull();
+      }
+      assertNoCanary(fixture);
+    } finally {
+      other.close();
+    }
+  });
+
+  it('propagates a non-unique persistence error without another attempt', async () => {
+    const fixture = openFixture();
+    const now = () => 1_700_000_000_000;
+    const taken = allocatePersonaId({ now, randomBytes: () => fill(1) });
+    const second = allocatePersonaId({ now, randomBytes: () => fill(2) });
+    const other = openStore({ file: fixture.store.file });
+    let draws = 0;
+    try {
+      const life = createPersonaLifecycle({
+        store: fixture.store,
+        logger: fixture.logger,
+        bootId: BOOT_A,
+        now,
+        randomBytes: () => {
+          draws += 1;
+          return fill(draws);
+        },
+        beforeInsert: (id) => {
+          if (id === taken) {
+            reposOf(other).personas.insert({
+              id,
+              displayName: 'Racer',
+              state: 'CREATED',
+              createdAt: 1,
+              updatedAt: 1,
+            });
+            return;
+          }
+          fixture.store.close();
+        },
+      });
+
+      let thrown: unknown;
+      try {
+        await life.createPersona({ displayName: CANARY });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(isPersistenceError(thrown)).toBe(true);
+      expect(isRuntimeError(thrown)).toBe(false);
+      if (!isPersistenceError(thrown)) {
+        throw new Error('expected the store error unchanged');
+      }
+      expect(thrown.code).toBe('store_closed');
+      expect(thrown.message.includes(CANARY)).toBe(false);
+      expect(draws).toBe(2);
+
+      const stored = reposOf(other);
+      expect(stored.personas.getById(taken)).toMatchObject({ displayName: 'Racer' });
+      expect(stored.runtimeState.get(taken)).toBeNull();
+      expect(stored.personas.getById(second)).toBeNull();
+      expect(stored.runtimeState.get(second)).toBeNull();
+      expect(stored.personas.list()).toHaveLength(1);
+    } finally {
+      other.close();
+    }
   });
 
   it('rejects a bad display name without inserting', async () => {
@@ -697,6 +896,14 @@ describe('persona lifecycle — arguments', () => {
         store: fixture.store,
         logger: { ...fixture.logger, info: undefined as unknown as RuntimeLogger['info'] },
         bootId: BOOT_A,
+      }),
+    ).toThrow(RuntimeError);
+    expect(() =>
+      createPersonaLifecycle({
+        store: fixture.store,
+        logger: fixture.logger,
+        bootId: BOOT_A,
+        beforeInsert: 1 as unknown as () => void,
       }),
     ).toThrow(RuntimeError);
 
