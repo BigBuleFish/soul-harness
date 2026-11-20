@@ -31,8 +31,7 @@ import {
 import type { PersonaRow, PersonaState, RuntimeStateRow } from '@soul-harness/persistence';
 
 import { RuntimeError } from '../errors.js';
-import { allocatePersonaId } from '../ids/allocate.js';
-import type { AllocateOptions } from '../ids/allocate.js';
+import { ID_ALLOCATION_MAX_ATTEMPTS, allocatePersonaId } from '../ids/allocate.js';
 import { createKeyedQueue } from './queue.js';
 
 /** Implementation limit. The personas table has no length check of its own. */
@@ -73,6 +72,15 @@ export interface PersonaLifecycleOptions {
   readonly now?: () => number;
   /** Forwarded to the persona id allocator. Default `crypto.randomBytes`. */
   readonly randomBytes?: (size: number) => Uint8Array;
+  /**
+   * Test seam. Production callers omit it.
+   *
+   * Invoked after a candidate id has passed the occupancy pre-check and
+   * before `insertWithRuntimeState`. A returned promise is awaited. Another
+   * connection can commit that same id here; the insert then sees
+   * `unique_conflict` and allocation tries again. Not a production operation.
+   */
+  readonly beforeInsert?: (personaId: PersonaId) => void | Promise<void>;
   /**
    * Test seam. Production callers omit it.
    *
@@ -403,40 +411,52 @@ export function createPersonaLifecycle(options: PersonaLifecycleOptions): Person
         throw new RuntimeError('invalid_argument', 'createPersona input must be an object');
       }
       assertDisplayName(input.displayName);
-      return queue.run(CREATE_QUEUE_KEY, () => {
+      return queue.run(CREATE_QUEUE_KEY, async () => {
         const now = readClock();
-        const allocateOptions: AllocateOptions = {
-          now: () => now,
-          isOccupied: (candidate) =>
-            isPersonaId(candidate) && repos.personas.getById(candidate) !== null,
-          ...(options.randomBytes === undefined ? {} : { randomBytes: options.randomBytes }),
-        };
-        const id = allocatePersonaId(allocateOptions);
-        try {
-          const written = repos.personas.insertWithRuntimeState({
-            id,
-            displayName: input.displayName,
-            state: 'CREATED',
-            bootId: null,
-            createdAt: now,
-            updatedAt: now,
+        // IDENTITY-PROTOCOL §3.3: a primary-key conflict is a collision, so
+        // draw again. The cap is the allocator's own constant. A conflict
+        // rolls the insert back, including the runtime_state mirror.
+        let collision: unknown;
+        for (let attempt = 1; attempt <= ID_ALLOCATION_MAX_ATTEMPTS; attempt += 1) {
+          const id = allocatePersonaId({
+            now: () => now,
+            isOccupied: (candidate) =>
+              isPersonaId(candidate) && repos.personas.getById(candidate) !== null,
+            ...(options.randomBytes === undefined ? {} : { randomBytes: options.randomBytes }),
           });
-          safeLog('info', 'persona.created', {
-            personaId: id,
-            state: written.persona.state,
-            version: written.persona.version,
-            epoch: written.persona.epoch,
-            bootId: options.bootId,
-          });
-          return toSnapshot(written.persona, written.runtimeState);
-        } catch (error) {
-          if (isPersistenceError(error) && error.code === 'unique_conflict') {
-            throw new RuntimeError('id_collision', 'persona id collided on insert', {
-              cause: error,
-            });
+          const waited = options.beforeInsert?.(id);
+          if (isThenable(waited)) {
+            await waited;
           }
-          throw error;
+          try {
+            const written = repos.personas.insertWithRuntimeState({
+              id,
+              displayName: input.displayName,
+              state: 'CREATED',
+              bootId: null,
+              createdAt: now,
+              updatedAt: now,
+            });
+            safeLog('info', 'persona.created', {
+              personaId: id,
+              state: written.persona.state,
+              version: written.persona.version,
+              epoch: written.persona.epoch,
+              bootId: options.bootId,
+            });
+            return toSnapshot(written.persona, written.runtimeState);
+          } catch (error) {
+            if (isPersistenceError(error) && error.code === 'unique_conflict') {
+              collision = error;
+              continue;
+            }
+            throw error;
+          }
         }
+        throw new RuntimeError('id_collision', 'persona id allocation exhausted its retry budget', {
+          ...(collision === undefined ? {} : { cause: collision }),
+          details: { prefix: 'psn', attempts: ID_ALLOCATION_MAX_ATTEMPTS },
+        });
       });
     },
 
@@ -627,6 +647,11 @@ function assertOptions(options: PersonaLifecycleOptions): void {
   if (options.randomBytes !== undefined && typeof options.randomBytes !== 'function') {
     throw new RuntimeError('invalid_argument', 'randomBytes must be a function', {
       details: { field: 'randomBytes' },
+    });
+  }
+  if (options.beforeInsert !== undefined && typeof options.beforeInsert !== 'function') {
+    throw new RuntimeError('invalid_argument', 'beforeInsert must be a function', {
+      details: { field: 'beforeInsert' },
     });
   }
   if (options.beforeCommit !== undefined && typeof options.beforeCommit !== 'function') {
