@@ -132,13 +132,12 @@ describe('whole package, real file, two process lifetimes', () => {
       receivedAt: NOW,
       updatedAt: NOW,
     });
-    repos.tasks.insert({
+    repos.tasks.insertQueuedTask({
       id: TASK,
       personaId: PERSONA,
       kind: 'thought.run',
       channel: 'inner',
-      state: 'queued',
-      payloadJson: { eventId: EVENT },
+      payloadRefs: { eventId: EVENT },
     });
     repos.checkpoints.save({
       personaId: PERSONA,
@@ -269,12 +268,11 @@ describe('transaction boundaries hold when repositories are combined', () => {
       attentionOutcome: 'ignored',
       updatedAt: NOW + 3,
     });
-    repos.tasks.insert({
+    repos.tasks.insertQueuedTask({
       id: TASK,
       personaId: PERSONA,
       kind: 'thought.run',
       channel: 'inner',
-      state: 'queued',
     });
     repos.runtimeState.upsert({
       personaId: PERSONA,
@@ -324,12 +322,11 @@ describe('transaction boundaries hold when repositories are combined', () => {
 
       expect(
         codeOf(() =>
-          repos.tasks.insert({
+          repos.tasks.insertQueuedTask({
             id: TASK,
             personaId: PERSONA,
             kind: 'thought.run',
             channel: 'inner',
-            state: 'queued',
           }),
         ),
       ).toBe('nested_write');

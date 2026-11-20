@@ -119,7 +119,7 @@ withRead(store, (tx) => T): T
 | `personas` | `insert` / `insertWithRuntimeState` / `getById` / `updateState`（版本自增）/ `compareAndSetState`（条件写）/ `commitLifecycle`（条件写并镜像 `runtime_state`）/ `list(limit)` / `listPage`（键集分页） |
 | `sessions` | `insert` / `getById` / `findActiveByExternal` / `openActive`（只返回未关闭映射，关闭后插入新 id）/ `close` / `listByPersona` |
 | `events` | `insert`（archive 三列不可设；`summary` 只接受 NULL；`adapterEventRef` 强制格式）/ `getById` / `findByDedupeKey` / `updateStatus` / `expireIfActive`（条件写：必须带 `personaId`，且仅 P1 `archive_state='none'`，只写 `buffer_lost`）/ `commitP1Envelope`（同一事务 `received` → P1 结局）/ `expireActive`（同一守卫，只接受过期原因码）/ `rejectIfActive`（同一守卫，只接受拒绝原因码）/ `listByPersonaStatus` / `listPageByPersonaStatus`（键集分页） |
-| `tasks` | `insert` / `getById` / `updateState` / `listByPersonaState` |
+| `tasks` | `insertQueuedTask`（只能建 `queued`）/ `getById` / `claimNext`（条件领取）/ `completeTask` / `failTask` / `failExhaustedTask` / `recoverRunningTask`（persona 作用域 CAS）/ `setTaskState`（四对迁移）/ `listByPersonaState` / `listPageByPersonaState`（键集分页 + attempt 过滤）/ `nextDueAt` |
 | `runtime_state` | `upsert`（不触碰 checkpoint）/ `get` |
 | `checkpoints` | `load` / `save`（见 §7.1；**无 clear**） |
 | `schema_migrations` | **只读**：`listApplied` / `getLatest` |
@@ -242,6 +242,30 @@ Ingress 需要两件现有方法做不到的事：在一个写事务里区分「
 `expireIfActive` 仍只写 `buffer_lost`，语义与 SH-008P / PR #3 相同，没有改成通用方法。运行期把活跃事件收成 `rejected` 走 `rejectIfActive`，不借用 `buffer_lost`。`openActive` 的 `externalId` 必须是去掉首尾空白、不含空白或控制字符、长度 1..256 的字符串（`ACTIVE_SESSION_EXTERNAL_ID_MAX_LENGTH`）。这是写入边界，不是协议里的新字符集；超限在开事务前拒绝。原有 `sessions.insert` 不套用这条长度限制。
 
 `commitP1Envelope` 的 `outcome` 只允许 `accepted`，或 `expired` 且原因为 `queue_overflow`。其它形状在开事务前 → `invalid_argument`。
+
+### 7.5 任务状态机与条件写（SH-008D D1）
+
+`tasks` 不再有通用状态写入：`insert` 与 `updateState` 已移除。每条边只对应一个方法，且守卫写在同一条 `UPDATE` 里，不存在「先读后写」的窗口。
+
+| 方法 | 守卫 | 结果 |
+|---|---|---|
+| `insertQueuedTask({ id, personaId, kind, channel, priority?, payloadRefs?, scheduledAt? })` | 无 state/attempt 入参 | 只能生成 `queued`、`attempt=0`、`run_id`/`started_at`/`finished_at` 全 NULL |
+| `claimNext({ personaId, channel, now, runId, maxAttempts, kinds })` | queued + 同 channel + 到期 + `typeof(attempt)='integer'` + `0 ≤ attempt < max` + `kind IN (…)` + 人格 `RUNNING` | 单条 `UPDATE … RETURNING id`：`attempt+1`、写新 `run_id`、`started_at=now`、清 `finished_at`。`kinds` 为空 → 返回 `null` 且**不访问数据库** |
+| `completeTask({ id, runId, expectedAttempt, finishedAt })` | `state='running'` + `run_id` + `attempt` | `done` |
+| `failTask({ id, runId, expectedAttempt, maxAttempts, retry, finishedAt, nextScheduledAt? })` | 同上 | `attempt < max` 时退回 `queued`（`finished_at=NULL`、`scheduled_at=nextScheduledAt`）；否则 `failed`。**即使 `retry=true`，到上限也只会 `failed`** |
+| `failExhaustedTask({ id, expectedState, expectedAttempt, maxAttempts, finishedAt })` | `state ∈ {queued, paused}` + `attempt = ?` + `attempt ≥ max` | `failed` |
+| `recoverRunningTask({ id, personaId, expectedRunId, expectedAttempt, maxAttempts, finishedAt })` | `state='running'` + `persona_id` + `run_id` + `attempt` + attempt 合法性 | `attempt < max` → `queued`（attempt 不变）；否则 `failed`（`finished_at=finishedAt`） |
+| `setTaskState({ id, expectedState, nextState, at, maxAttempts? })` | 仅四对：`queued→paused`、`paused→queued`、`queued→cancelled`、`paused→cancelled` | 取消写 `finished_at=at`；`paused→queued` 额外要求 attempt 合法且 `< maxAttempts` |
+| `listPageByPersonaState({ personaId, state, afterId?, limit?, attemptFilter? })` | 键集分页（`id` 游标） | `attemptFilter = {kind:'atLeast',value}` 只匹配合法 attempt；`{kind:'invalid'}` 匹配 `claimNext` 永远领不到的行 |
+| `nextDueAt({ after })` | `queued` + `scheduled_at > after` + 合法 attempt | 最早未来到期时间或 `null` |
+
+约束：
+
+- 所有状态迁移都是**条件写**；条件不匹配返回 `null` 且零修改，不抛错（参数非法才抛 `invalid_argument`，且在开事务前）。
+- `run_id` / `attempt` 是执行身份与并发令牌；`version` 不参与 tasks（该表没有 version 列）。
+- `payload_json` 只允许 `{ eventId?, threadId? }`；未知键、非品牌 ID → `invalid_argument`，数据库零修改（DATA-MODEL §3.1）。
+- `attempt` 合法性谓词统一为 `typeof(attempt)='integer' AND attempt >= 0 AND attempt <= 9007199254740991`；非法 attempt 既不会被领取，也不会被 `atLeast` 过滤误当成「已达上限」。
+- 删除 `updateState` 后，没有任何公开方法能无条件改写 `tasks.state`；已有测试与调用点已改用上述方法。
 
 ## 8. Migration 机制
 

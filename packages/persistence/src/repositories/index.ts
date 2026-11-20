@@ -53,7 +53,20 @@ export type {
 } from './events.js';
 
 export { createTaskRepository } from './tasks.js';
-export type { InsertTaskInput, TaskRepository, UpdateTaskStateInput } from './tasks.js';
+export type {
+  ClaimNextTaskInput,
+  CompleteTaskInput,
+  FailExhaustedTaskInput,
+  FailTaskInput,
+  InsertQueuedTaskInput,
+  ListTaskPageInput,
+  NextDueTaskQuery,
+  RecoverRunningTaskInput,
+  SetTaskStateInput,
+  TaskAttemptFilter,
+  TaskPayloadRefs,
+  TaskRepository,
+} from './tasks.js';
 
 export { createRuntimeStateRepository } from './runtime-state.js';
 export type { RuntimeStateRepository, UpsertRuntimeStateInput } from './runtime-state.js';

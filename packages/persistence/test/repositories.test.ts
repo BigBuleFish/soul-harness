@@ -3,6 +3,7 @@ import type {
   AdapterId,
   EventId,
   PersonaId,
+  RunId,
   SessionId,
   SourceId,
   TaskId,
@@ -21,6 +22,7 @@ const PERSONA_2 = 'psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABD' as PersonaId;
 const SESSION = 'ses_01JQ8Z4A6N8Q0S3V5W7Y9B1CDE' as SessionId;
 const EVENT = 'evt_01JQ8Z7D9R1T3V5X7Z9A1B3DFH' as EventId;
 const TASK = 'tsk_01JQ8Z6B7P9R1T3V5X7Z9A2BDF' as TaskId;
+const RUN = 'run_01JQ8Z6C8Q0S2T4W6Y8A0B2CEG' as RunId;
 const ADAPTER = 'minecraft' as AdapterId;
 const SOURCE = 'minecraft.chat' as SourceId;
 
@@ -317,60 +319,62 @@ describe('tasks repository', () => {
     const { repos } = setup();
     seedPersona(repos);
 
-    const task = repos.tasks.insert({
+    const task = repos.tasks.insertQueuedTask({
       id: TASK,
       personaId: PERSONA,
       kind: 'thought.run',
       channel: 'inner',
-      state: 'queued',
       priority: 5,
-      payloadJson: { eventId: EVENT },
+      payloadRefs: { eventId: EVENT },
       scheduledAt: NOW,
     });
 
     expect(task.payloadJson).toStrictEqual({ eventId: EVENT });
     expect(task.priority).toBe(5);
     expect(task.attempt).toBe(0);
+    expect(task.state).toBe('queued');
+    expect(task.runId).toBeNull();
     expect(task.startedAt).toBeNull();
+    expect(task.finishedAt).toBeNull();
   });
 
-  it('updates state with explicit timestamps', () => {
+  it('walks queued → running → done through guarded writes', () => {
     const { repos } = setup();
     seedPersona(repos);
-    repos.tasks.insert({
+    repos.tasks.insertQueuedTask({
       id: TASK,
       personaId: PERSONA,
       kind: 'thought.run',
       channel: 'inner',
-      state: 'queued',
     });
 
-    const running = repos.tasks.updateState({
-      id: TASK,
-      state: 'running',
-      startedAt: NOW + 1,
-      finishedAt: null,
-      attempt: 1,
+    const running = repos.tasks.claimNext({
+      personaId: PERSONA,
+      channel: 'inner',
+      now: NOW + 1,
+      runId: RUN,
+      maxAttempts: 3,
+      kinds: ['thought.run'],
     });
-    expect(running?.startedAt).toBe(NOW + 1);
+    expect(running?.state).toBe('running');
     expect(running?.attempt).toBe(1);
+    expect(running?.startedAt).toBe(NOW + 1);
+    expect(running?.runId).toBe(RUN);
 
-    const done = repos.tasks.updateState({
+    const done = repos.tasks.completeTask({
       id: TASK,
-      state: 'done',
-      startedAt: NOW + 1,
+      runId: RUN,
+      expectedAttempt: 1,
       finishedAt: NOW + 9,
-      attempt: 1,
     });
     expect(done?.finishedAt).toBe(NOW + 9);
     expect(repos.tasks.listByPersonaState({ personaId: PERSONA, state: 'done' })).toHaveLength(1);
     expect(
-      repos.tasks.updateState({
+      repos.tasks.completeTask({
         id: 'tsk_01JQ8Z6B7P9R1T3V5X7Z9A2BDG' as TaskId,
-        state: 'done',
-        startedAt: null,
-        finishedAt: null,
-        attempt: 0,
+        runId: RUN,
+        expectedAttempt: 1,
+        finishedAt: NOW + 10,
       }),
     ).toBeNull();
   });
