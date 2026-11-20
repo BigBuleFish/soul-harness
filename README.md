@@ -14,17 +14,19 @@ DSH / Minecraft / QQ / CLI 都是**可选适配器**；不安装它们，Daemon 
 Monorepo 根工程化已完成（SH-005）。
 
 **P1 进行中。** `packages/persistence` 已完成（SH-006A–D）；`apps/soul-daemon` 的生命周期与
-装配层已完成（SH-007A）。**Runtime、API/WebSocket 仍未实现。**
+装配层已完成（SH-007A）。`packages/runtime` 的 ID 分配器已完成（SH-008A）。
+**Persona 生命周期、事件总线、调度器、API/WebSocket 仍未实现。**
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 主计划、ADR、信任边界、数据模型、生命周期、模块边界、身份协议、协作规范 | 文档主体已完成（SH-001 → SH-003.2）；**`packages/contracts` 已实现（SH-004）** |
-| P1 | Monorepo 骨架、Daemon 生命周期、Persistence、最小 API | **Monorepo 骨架（SH-005）**、**Persistence（SH-006A–D）**、**Daemon 生命周期与装配（SH-007A）** 已完成；Runtime / API / WebSocket 未开始 |
+| P1 | Monorepo 骨架、Daemon 生命周期、Persistence、最小 API | **Monorepo 骨架（SH-005）**、**Persistence（SH-006A–D）**、**Daemon 生命周期与装配（SH-007A）**、**Runtime ID 分配器（SH-008A）** 已完成；SH-008 其余部分与 API / WebSocket 未开始 |
 | P2+ | 事件接入、记忆网络、激活、自主认知、遗忘、睡眠梦境、外部适配 | 未开始 |
 
 目录和文档存在**不代表**功能完成。任何"已实现"必须以测试与验收记录为凭。
-目前满足该标准的是 `packages/contracts`（SH-004）、`packages/persistence`（SH-006A–D）
-和 `apps/soul-daemon` 的生命周期装配（SH-007A）。这三者都不是认知 Runtime。
+目前满足该标准的是 `packages/contracts`（SH-004）、`packages/persistence`（SH-006A–D）、
+`apps/soul-daemon` 的生命周期装配（SH-007A），以及 `packages/runtime` 的 ID 分配器（SH-008A）。
+这些都不是认知 Runtime。
 
 ## 文档入口
 
@@ -50,7 +52,8 @@ Monorepo 根工程化已完成（SH-005）。
 │  └─ soul-daemon/            # 生命周期与装配（SH-007A）。无认知循环，无 HTTP/WS
 ├─ packages/
 │  ├─ contracts/              # 协议契约包（SH-004，零运行时依赖）
-│  └─ persistence/            # SQLite 持久化（SH-006A–D）
+│  ├─ persistence/            # SQLite 持久化（SH-006A–D）
+│  └─ runtime/                # ID 分配器（SH-008A）。尚无生命周期、事件总线、调度器
 ├─ tools/consumer-check/      # 跨包导入验证：按包名导入 ESM + d.ts
 ├─ docs/                      # 架构文档（唯一基线）
 ├─ .github/workflows/ci.yml   # CI：format / lint / typecheck / test / build / consumer
@@ -68,6 +71,7 @@ Monorepo 根工程化已完成（SH-005）。
 |---|---|---|
 | [packages/contracts](packages/contracts/README.md) | 协议类型、10 份已注册 JSON Schema、枚举与标识符格式；双层信封（适配器输入层 / Ingress 归一化层）、零运行时依赖、无 IO、不生成 ID | **已实现（协议层，SH-004）**，含测试与正反 fixtures |
 | [packages/persistence](packages/persistence/README.md) | SQLite（WAL、单写入者）、Migration、事务协调器、六表 Repository、字段映射、Runtime checkpoint envelope 存取 | **已完成（SH-006A–D）**。不重建 Runtime；无显式 `PRAGMA wal_checkpoint` |
+| [packages/runtime](packages/runtime/README.md) | 六类核心 ID 与辅助 ID（`tsk` / `cnf`）分配；碰撞重试。无 SQL | **已完成（SH-008A）**。Persona 生命周期、事件总线、调度器、恢复扫描未实现；Daemon 未装配 |
 | [apps/soul-daemon](apps/soul-daemon/README.md) | 配置、结构化日志、数据目录、单实例锁、打开 SQLite、Migration、启停状态机 | **已完成（SH-007A）**。Persona / Runtime 恢复、Event Bus、Scheduler、API 未实现 |
 
 ## 旧系统
@@ -119,6 +123,8 @@ pnpm run check:consumer          # 按包名导入 ESM + d.ts 的实际验证
 8. **去重只保证"同一条事件"，不保证"同一段正文"。** 只有 `required` 且已归档时才能发现同键异内容
    （`archive.compare` → 409）；`excluded` 与 P1 下**无法发现差异**，重复投递的正文可能被丢弃
    （见 [IDENTITY-PROTOCOL](docs/architecture/IDENTITY-PROTOCOL.md) §4.5.1）。
+9. **P1 不保存历史 run。** `tasks.run_id` 只保留当前尝试；放弃的尝试不恢复，复盘靠结构化日志里的 `runId`。
+   独立 `runs` 表留到后续阶段（IDENTITY-PROTOCOL OPEN-1，2026-11-20 已决定）。
 
 ## 许可
 

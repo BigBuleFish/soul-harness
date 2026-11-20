@@ -4,7 +4,7 @@
   `packages/`（[MODULES](../../docs/architecture/MODULES.md) §4）。
 - **状态**：**SH-007A 已完成**——配置、结构化日志、数据目录检查、单实例锁、打开 SQLite、
   执行 Migration、启动/关闭状态机与资源逆序释放。
-  **Runtime、事件总线、Scheduler、HTTP/WebSocket、健康检查尚未实现**（SH-008 / SH-009）。
+  **Daemon 仍未装配 Runtime。** `packages/runtime` 目前只有 ID 分配器（SH-008A）；事件总线、Scheduler、HTTP/WebSocket、健康检查尚未实现（SH-008B–E / SH-009）。
   SH-007B 不是下一批代码：它依赖 SH-008 与 SH-009 的真实组件接入，之后才验收 Daemon 的启动、就绪、关闭、资源释放与失败处理，自身不单独实施代码。
 - **上位文档**：[RUNTIME-LIFECYCLE](../../docs/architecture/RUNTIME-LIFECYCLE.md) §2/§3/§4/§9、
   [PLAN](../../docs/PLAN.md) §6/§7、[MODULES](../../docs/architecture/MODULES.md) §1/§4。

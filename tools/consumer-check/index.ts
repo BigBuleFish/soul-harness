@@ -38,6 +38,7 @@ import {
   type Store,
   type Tx,
 } from '@soul-harness/persistence';
+import { allocatePersonaId, allocateSessionId } from '@soul-harness/runtime';
 
 export const personaId: PersonaId = 'psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC' as PersonaId;
 
@@ -86,3 +87,23 @@ export const readAsWrite = (tx: ReadTx): Tx => tx;
 
 export const loadResult = (persona: PersonaId): CheckpointLoadResult =>
   createRepositories(store).checkpoints.load(persona);
+
+// --- runtime: SH-008A publishes the allocator and nothing that pretends to run ---
+
+const zeroEntropy = (): Uint8Array => new Uint8Array(10);
+
+export const generatedPersona: PersonaId = allocatePersonaId({
+  now: () => 0,
+  randomBytes: zeroEntropy,
+});
+
+// @ts-expect-error a session id is not a persona id
+export const sessionIsNotPersona: PersonaId = allocateSessionId({
+  now: () => 0,
+  randomBytes: zeroEntropy,
+});
+
+export const callerSuppliedId: PersonaId = allocatePersonaId({
+  // @ts-expect-error callers cannot choose an internal identifier
+  id: 'psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC',
+});
