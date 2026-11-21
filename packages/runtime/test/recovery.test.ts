@@ -424,7 +424,7 @@ describe('recoverRuntime — scan and budget behavior', () => {
     expect(report.incomplete).toBeNull();
   });
 
-  it('aborts before scanning when the signal is already aborted', async () => {
+  it('aborts before any scan work when the signal is already aborted (pre-scan cancellation)', async () => {
     const { store } = openFixture();
     seedPersona(store, 1);
     seedTask(store, 1);
@@ -437,22 +437,62 @@ describe('recoverRuntime — scan and budget behavior', () => {
     expect(taskState(store, 1)?.state).toBe('queued');
   });
 
-  it('aborts mid-run when the signal trips after start', async () => {
+  it('aborts during the scan after the first persona was actually processed', async () => {
+    const { store } = openFixture();
+    for (const n of [1, 2]) {
+      seedPersona(store, n);
+      seedTask(store, n, n);
+      claimRunning(store, n, n);
+    }
+    const controller = new AbortController();
+    let calls = 0;
+    // The clock runs inside U1, after persona 1 was enumerated, read and its row
+    // validated. Aborting here proves cancellation observed *after* real work.
+    const abortingClock = (): number => {
+      calls += 1;
+      if (calls === 2) {
+        controller.abort();
+      }
+      return NOW;
+    };
+
+    const report = await recover(store, { now: abortingClock, signal: controller.signal });
+
+    expect(report.incomplete?.reason).toBe('aborted');
+    expect(report.tasks).toStrictEqual({ requeued: 1, failed: 0 });
+    // Persona 1's conditional migration stays committed (no fake rollback);
+    // persona 2 must not be scanned or written after the cancel boundary.
+    expect(taskState(store, 1)).toMatchObject({ state: 'queued', attempt: 1, runId: rid(1) });
+    expect(taskState(store, 2)).toMatchObject({ state: 'running', attempt: 1, runId: rid(2) });
+  });
+
+  it('aborts during the global probe after at least one real probe ran', async () => {
     const { store } = openFixture();
     seedPersona(store, 1);
     const controller = new AbortController();
-    const abortingLogger: RuntimeLogger = {
+    const probed: string[] = [];
+    const logger: RuntimeLogger = {
       ...silentLogger,
-      info: (event) => {
-        if (event === 'recovery_started') {
+      debug: (event, fields) => {
+        if (event === 'recovery_probe') {
+          probed.push(String(fields?.['unit']));
           controller.abort();
         }
       },
     };
 
-    const report = await recover(store, { signal: controller.signal, logger: abortingLogger });
+    // One query is spent enumerating personas: the scan stops on its budget and
+    // the U1 boundary probe becomes the first real probe of this run.
+    const report = await recover(store, {
+      maxScanQueries: 1,
+      signal: controller.signal,
+      logger,
+    });
 
+    expect(probed).toStrictEqual(['U1']);
+    // Cancellation must override the budget reason and never read as complete.
     expect(report.incomplete?.reason).toBe('aborted');
+    expect(report.personasScanned).toBe(1);
   });
 
   it('never claims tasks (recovery only requeues)', async () => {

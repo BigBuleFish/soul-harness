@@ -252,7 +252,7 @@ function resolveOptions(options: RecoverRuntimeOptions): ResolvedOptions {
 
 function safeLog(
   logger: RuntimeLogger,
-  level: 'info' | 'warn',
+  level: 'debug' | 'info' | 'warn',
   event: string,
   fields: Readonly<Record<string, string | number | boolean | null>>,
 ): void {
@@ -488,6 +488,11 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
       }
       state.rows += page.length;
       for (const row of page) {
+        if (aborted()) {
+          abort('aborted');
+          mark(personaId, unit, false, cursor);
+          return;
+        }
         onRow(row);
         if (stop !== null) {
           mark(personaId, unit, false, cursor);
@@ -538,6 +543,11 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
       const page = fetch(limit, cursor);
       state.rows += page.length;
       for (const row of page) {
+        if (aborted()) {
+          abort('aborted');
+          mark(personaId, unit, false, cursor);
+          return;
+        }
         onRow(row);
         if (stop !== null) {
           mark(personaId, unit, false, cursor);
@@ -957,6 +967,13 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
         if (pendingStop()?.reason === 'invalid_task_row') {
           return;
         }
+        // Boundary log: one entry per completed probe. Diagnostics only; it
+        // carries ids/unit names, never payload or free text.
+        safeLog(cfg.logger, 'debug', 'recovery_probe', {
+          personaId,
+          unit,
+          probes: state.probeQueries,
+        });
       }
     }
 
