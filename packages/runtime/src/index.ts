@@ -11,11 +11,16 @@
  *
  * SH-008C: in-process P1 ingress. Validate the stimulus, dedupe without
  * comparing bodies, map sessions, commit the envelope, and hold the body in
- * a per-persona TTL buffer. No Archive, no HTTP, no scheduler.
+ * a per-persona TTL buffer. No Archive, no HTTP.
+ *
+ * SH-008D: Recovery (D2) and the in-process Scheduler (D3). The Scheduler
+ * claims due tasks through persistence, dispatches registered handlers with
+ * bounded concurrency, settles through CAS, and coordinates with Recovery via
+ * a process-local Store lease.
  *
  * What this package is NOT yet, and must not pretend to be:
- *   - no scheduler, recovery scans, or checkpoint load/save
- *   - no Daemon wiring and no HTTP surface
+ *   - no checkpoint load/save orchestration and no Daemon wiring
+ *   - no HTTP surface
  *   - no SQL in this package; persistence owns every statement
  *   - no Archive, Action Gateway, or Dream Sandbox
  *   - no path that accepts an externally chosen internal id
@@ -87,3 +92,19 @@ export type {
 } from './recovery/recover.js';
 export { PER_PERSONA_SCAN_QUERIES, computeDefaultMaxScanQueries } from './recovery/budget.js';
 export type { ScanQueryBudgetInput } from './recovery/budget.js';
+
+export { createScheduler } from './scheduler/scheduler.js';
+export type {
+  EnqueueTaskInput,
+  ScopedTaskRef,
+  SchedulerConfig,
+  SchedulerOptions,
+  SchedulerPolicy,
+  SchedulerState,
+  SchedulerStats,
+  SchedulerTimers,
+  TaskHandler,
+  TaskHandlerContext,
+  TaskScheduler,
+  TickReport,
+} from './scheduler/scheduler.js';

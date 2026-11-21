@@ -26,6 +26,7 @@ import { createRepositories } from '@soul-harness/persistence';
 import { readClock } from '../clock.js';
 import { RuntimeError } from '../errors.js';
 import type { RuntimeLogger } from '../persona/lifecycle.js';
+import { acquireStoreLease } from '../store-lease.js';
 import { computeDefaultMaxScanQueries } from './budget.js';
 
 export type RecoveryIncompleteReason =
@@ -270,8 +271,7 @@ function safeLog(
  * scheduler. Returns a report whose `incomplete` is `null` only when every
  * remaining range was proven empty.
  */
-export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<RecoveryReport> {
-  const cfg = resolveOptions(options);
+async function runRecovery(cfg: ResolvedOptions): Promise<RecoveryReport> {
   const repos = createRepositories(cfg.store);
   const clock = (): number => readClock(cfg.now);
 
@@ -1013,4 +1013,21 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
     scanned: state.personas,
   });
   return report(afterProbe);
+}
+
+/**
+ * Public Recovery entry.
+ *
+ * Options are validated before any Store access, then the Store-scoped
+ * Recovery lease is taken so a Scheduler cannot run over the same Store
+ * (P7/P8). The lease is released on both the success and the failure path.
+ */
+export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<RecoveryReport> {
+  const cfg = resolveOptions(options);
+  const release = acquireStoreLease(cfg.store, 'recovery');
+  try {
+    return await runRecovery(cfg);
+  } finally {
+    release();
+  }
 }

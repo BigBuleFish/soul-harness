@@ -15,6 +15,8 @@ export const RUNTIME_ERROR_CODES = [
   'id_encoding',
   'not_found',
   'illegal_transition',
+  'illegal_task_row',
+  'task_exhausted',
   'version_conflict',
   'schema_invalid',
   'closed',
