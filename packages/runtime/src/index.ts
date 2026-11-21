@@ -75,3 +75,15 @@ export type {
 } from './events/bus.js';
 export type { BufferCloseReason } from './events/bus.js';
 export type { IngressScheduler, IngressTimer } from './events/buffer.js';
+
+export { recoverRuntime } from './recovery/recover.js';
+export type {
+  RecoverRuntimeOptions,
+  RecoveryIncomplete,
+  RecoveryIncompleteDetail,
+  RecoveryIncompleteReason,
+  RecoveryPolicy,
+  RecoveryReport,
+} from './recovery/recover.js';
+export { PER_PERSONA_SCAN_QUERIES, computeDefaultMaxScanQueries } from './recovery/budget.js';
+export type { ScanQueryBudgetInput } from './recovery/budget.js';

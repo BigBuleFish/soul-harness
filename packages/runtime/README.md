@@ -1,7 +1,7 @@
 # `@soul-harness/runtime` — 认知运行时
 
 - **地位**：L3 编排层。业务逻辑在这里，不在 Daemon（[MODULES](../../docs/architecture/MODULES.md) §2–§4）。
-- **状态**：**SH-008A 已完成：ID 分配器。SH-008B 已完成：进程内 Persona 生命周期。SH-008C 已完成：进程内 P1 Ingress。** 调度器、扫描 A/B、检查点装载/写出、Daemon 装配都还没有，对应 SH-008D–E。本目录没有这些能力的空类。
+- **状态**：**SH-008A 已完成：ID 分配器。SH-008B 已完成：进程内 Persona 生命周期。SH-008C 已完成：进程内 P1 Ingress。SH-008D D2 已完成：P1 Runtime Recovery（`recoverRuntime`）。** Scheduler（D3）、扫描 A/B、检查点装载/写出、Daemon 装配仍没有，对应 SH-008D 剩余批次与 SH-008E。本目录没有这些能力的空类。
 - **上位文档**：[RUNTIME-LIFECYCLE](../../docs/architecture/RUNTIME-LIFECYCLE.md) §4–§5、§7、§9，[IDENTITY-PROTOCOL](../../docs/architecture/IDENTITY-PROTOCOL.md) §3、§4.2、§4.5、§4.5.1，[DATA-MODEL](../../docs/architecture/DATA-MODEL.md) §3、§3.1、§6，[PLAN](../../docs/PLAN.md) §6.3，[MODULES](../../docs/architecture/MODULES.md) §2–§3。
 
 ## 1. 负责什么
@@ -89,12 +89,46 @@
 
 `externalSessionRef` 会写入 `sessions.external_id`。它是适配器自己的会话键，长度 1..256，不能含空白或控制字符。不要把消息正文放进去。
 
+### 1.4 P1 Runtime Recovery（SH-008D D2）
+
+`recoverRuntime({ store, logger, policy, now?, batchSize?, maxRowsPerRun?, maxScanQueries?, maxPersonasPerRun?, maxProbeQueries?, signal? })` 返回 `Promise<RecoveryReport>`。它只做 P1 的崩溃收敛，**不**做扫描 A/B、不读 Archive、不恢复检查点、不领取任务。
+
+扫描单元（每人格固定 10 次查询，顺序固定）：
+
+| 单元 | 对象 | 动作 |
+|---|---|---|
+| U1 | `running` task | 先校验 `run_id` / `attempt≥1` / `started_at` / `finished_at`；合法则 `recoverRunningTask`（persona 作用域 CAS）。`attempt < maxAttempts` → `queued`（attempt 不变），否则 → `failed` |
+| U2 | `queued` 非法 attempt | 命中即 abort `invalid_task_row`，不写 |
+| U3 | `queued` 合法且 `attempt ≥ maxAttempts` | `failExhaustedTask('queued')` → `failed` |
+| U4 | `paused` 非法 attempt | abort `invalid_task_row` |
+| U4b | `paused` 合法且 `attempt ≥ maxAttempts` | `failExhaustedTask('paused')` → `failed` |
+| U5 | `received` / `accepted`（两次查询） | `archive_state !== 'none'` → abort `archive_state_present`；否则 `expireIfActive` → `expired` + `buffer_lost` |
+| U6 | `noticed` / `understood` / `response_committed`（三次查询） | 命中即 abort `unexpected_event_status` |
+
+预算与完整性：
+
+| 预算 | 默认 | 行为 |
+|---|---|---|
+| `batchSize` | 200 | 每页上限 1..500 |
+| `maxRowsPerRun` | 10 000 | 正常扫描每次 `limit = min(batchSize, 剩余行预算)`，达到上限即停止正常扫描，**不超读** |
+| `maxScanQueries` | 自动：`ceil(maxPersonasPerRun/batchSize) + 1 + 10×maxPersonasPerRun + maxRowsPerRun`（默认 12 002，不因显式上限 1 000 000 被截断） | 显式值须在 1..1 000 000 |
+| `maxPersonasPerRun` | 200 | 枚举超出即停 |
+| `maxProbeQueries` | 200 | 只用于耗尽后的只读探测 |
+
+正常扫描因任何预算停止后，都会对**全部剩余范围**（未枚举的人格存在性 + 已枚举人格的未完成单元 + 单元游标之后）各做一次 `limit = 1` 探测。只有全部探测为空才报告 `incomplete: null`；探测命中则返回原始停止原因；探测预算耗尽返回 `probe_budget_exceeded`；`signal` 中止返回 `aborted`。
+
+`incomplete.reason` 是封闭集合：`row_budget_exceeded` / `scan_query_budget_exceeded` / `persona_budget_exceeded` / `probe_budget_exceeded` / `aborted` / `archive_state_present` / `unexpected_event_status` / `invalid_task_row` / `concurrent_modification`。条件写返回 `null` 视为并发修改，**不**当作已成功收口。
+
+`policy` 与 Scheduler 共用同一对象：Recovery 只读 `maxAttempts`，不使用 `retryBackoffMs`（退避由 Scheduler 计算 `nextScheduledAt`）。`now()` 每次读取都校验为非负安全整数，非法 → `invalid_clock`；参数非法 → `invalid_argument`，均在数据库操作之前。
+
+前置条件：Runtime 只断言 Store 可用且没有同 Store 的 Scheduler（Scheduler 尚未实现，当前恒成立）。单实例锁与独占 `RECOVERING` 由 SH-008E 的 Daemon 装配保证，Runtime 不声称验证。
+
 ## 2. 不负责什么
 
 1. **不接受外部指定的内部 ID。** 没有把调用方字符串收成 `PersonaId` 的函数。`createPersona` 的多余字段会被忽略。
 2. **不在本包写 SQL，不做 snake_case 映射，不读环境变量。** 权威写入只经过 `@soul-harness/persistence`。
 3. **不创建会话、思维、动作或冲突记录。** `allocateThreadId` / `allocateActionId` / `allocateConflictRecordId` 只产生符合格式的字符串。
-4. **不实现** 调度器、扫描 A/B、检查点装载/写出、Daemon 生命周期、HTTP。入口不导出 `createRuntime`、`enqueueTask`、`recover`、`checkpointAll`。`acceptStimulus` 不是自由函数，只在 `createStimulusIngress` 返回的对象上。
+4. **不实现** 调度器、扫描 A/B、检查点装载/写出、Daemon 生命周期、HTTP。入口只导出 `recoverRuntime`；不导出 `createRuntime`、`enqueueTask`、`checkpointAll`。`acceptStimulus` 不是自由函数，只在 `createStimulusIngress` 返回的对象上。
 5. **不提升 epoch，不分配 `bootId`。**
 6. **不保存历史 run。** OPEN-1 已决定：P1 不建 `runs` 表。
 7. **不声称 H12 整条通过。** 本批只保证人格级写队列和状态行互不覆盖。记忆、激活、授权不在这里。
