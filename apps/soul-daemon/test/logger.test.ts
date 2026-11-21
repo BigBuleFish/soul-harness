@@ -52,16 +52,67 @@ describe('structured logging', () => {
     expect(record['deep']).toStrictEqual({ apiKey: '[redacted]', note: 'ok' });
   });
 
-  it('reduces errors to name/code/message and never writes a stack', () => {
+  it('redacts a plain error message while keeping name and a string code', () => {
     const { lines, logger } = capture();
-    const error = new Error('boom');
-    (error as Error & { code?: string }).code = 'lock_held';
+    const error = Object.assign(new Error('boom'), {
+      name: 'DaemonError',
+      code: 'lock_held',
+    });
 
     logger.error('fatal', { error });
 
     const record = JSON.parse(lines[0] as string) as { error?: Record<string, unknown> };
-    expect(record.error).toStrictEqual({ name: 'Error', code: 'lock_held', message: 'boom' });
-    expect(JSON.stringify(record)).not.toContain('at ');
+    expect(record.error).toStrictEqual({
+      name: 'DaemonError',
+      code: 'lock_held',
+      message: '[redacted]',
+    });
+    expect(lines[0]).not.toContain('boom');
+  });
+
+  it('never serializes sensitive error text', () => {
+    const { lines, logger } = capture();
+    const secret = 'sk-live-SECRET-TOKEN-9f3e2a7c';
+    const userText = 'the persona said my password is hunter2';
+    const error = new Error(`Authorization: Bearer ${secret}; ${userText}`);
+
+    logger.error('fatal', { error });
+
+    const line = lines[0] as string;
+    expect(line).not.toContain(secret);
+    expect(line).not.toContain('hunter2');
+    expect(line).not.toContain('Authorization: Bearer');
+    expect(JSON.parse(line)).toMatchObject({ error: { message: '[redacted]' } });
+  });
+
+  it('never writes an error stack', () => {
+    const { lines, logger } = capture();
+    const error = new Error('boom');
+    const stackLine = error.stack?.split('\n')[1] ?? 'at ';
+
+    logger.error('fatal', { error });
+
+    const line = lines[0] as string;
+    expect(line).not.toContain(stackLine);
+    expect(line).not.toContain('.ts:');
+    expect(line).not.toContain('at ');
+  });
+
+  it('redacts errors nested in objects and arrays after serialization', () => {
+    const { lines, logger } = capture();
+    const error = Object.assign(new Error('nested boom'), { code: 'E_NESTED' });
+
+    logger.error('fatal', { context: { cause: error }, history: [error] });
+
+    const line = lines[0] as string;
+    expect(line).not.toContain('nested boom');
+    const record = JSON.parse(line) as {
+      context?: { cause?: Record<string, unknown> };
+      history?: Array<Record<string, unknown>>;
+    };
+    const redacted = { name: 'Error', code: 'E_NESTED', message: '[redacted]' };
+    expect(record.context?.cause).toStrictEqual(redacted);
+    expect(record.history?.[0]).toStrictEqual(redacted);
   });
 
   it('filters by level', () => {

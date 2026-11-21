@@ -5,7 +5,9 @@
  * §11.3): no event content, no memory content, no model input/output, no tokens
  * or keys — and no way to smuggle them in through an exception stack or a nested
  * object. Values that look like content are redacted by key before serialization,
- * and `Error` objects are reduced to `{ name, code, message }`.
+ * and `Error` objects are reduced to `{ name, code, message: '[redacted]' }`.
+ * `Error.message` is untrusted free text, so it gets the same placeholder as a
+ * redacted field instead of being written verbatim.
  */
 
 import type { LogLevel } from './config.js';
@@ -49,7 +51,9 @@ function sanitizeValue(value: unknown, depth: number): unknown {
     return {
       name: value.name,
       ...(typeof code === 'string' ? { code } : {}),
-      message: value.message,
+      // `message` is untrusted free text (credentials, user content, model
+      // output); keep the field shape but never the original text.
+      message: REDACTED,
     };
   }
   if (depth >= MAX_DEPTH) {
