@@ -977,7 +977,12 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
       }
     }
 
-    // Every remaining range was probed empty: the scan is complete after all.
+    // Every remaining range was probed empty. A cancellation observed after the
+    // final probe still wins: an aborted run must never report complete.
+    if (aborted()) {
+      stop = { reason: 'aborted' };
+      return;
+    }
     stop = null;
   };
 

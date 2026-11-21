@@ -495,6 +495,49 @@ describe('recoverRuntime — scan and budget behavior', () => {
     expect(report.personasScanned).toBe(1);
   });
 
+  it('aborts when cancellation lands after the final probe (U6c)', async () => {
+    const { store } = openFixture();
+    seedPersona(store, 1);
+    const controller = new AbortController();
+    const probed: string[] = [];
+    const logger: RuntimeLogger = {
+      ...silentLogger,
+      debug: (event, fields) => {
+        if (event === 'recovery_probe') {
+          const unit = String(fields?.['unit']);
+          probed.push(unit);
+          if (unit === 'U6c') {
+            controller.abort();
+          }
+        }
+      },
+    };
+
+    // The scan stops on its enumeration budget; every remaining unit is then
+    // probed empty. Aborting in the last probe (U6c) must still win over the
+    // "all probes empty => complete" decision.
+    const report = await recover(store, {
+      maxScanQueries: 1,
+      signal: controller.signal,
+      logger,
+    });
+
+    expect(probed).toStrictEqual([
+      'U1',
+      'U2',
+      'U3',
+      'U4',
+      'U4b',
+      'U5r',
+      'U5a',
+      'U6n',
+      'U6u',
+      'U6c',
+    ]);
+    expect(report.incomplete?.reason).toBe('aborted');
+    expect(report.incomplete).not.toBeNull();
+  });
+
   it('never claims tasks (recovery only requeues)', async () => {
     const { store } = openFixture();
     seedPersona(store, 1);
