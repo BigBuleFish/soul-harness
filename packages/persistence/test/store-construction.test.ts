@@ -152,8 +152,11 @@ describe('direct construction is blocked at runtime', () => {
   it('the constructor is private in the TypeScript declarations', () => {
     const dir = tempDir();
     const attempt = () => {
+      // Three full arguments: if the constructor ever becomes public, the only
+      // remaining error would be the argument count, so supplying every
+      // parameter (the third as `never`) makes this expect-error prove privacy.
       // @ts-expect-error Store's constructor is private; only openStore() may build one.
-      return new Store(join(dir, 'soul.db'), {} as DatabaseSync);
+      return new Store(join(dir, 'soul.db'), {} as DatabaseSync, undefined as never);
     };
 
     expect(codeOf(attempt)).toBe('invalid_argument');
