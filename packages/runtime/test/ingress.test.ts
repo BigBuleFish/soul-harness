@@ -47,6 +47,8 @@ import type {
   StimulusIngressConfig,
 } from '../src/index.js';
 
+import { seedEvent } from './helpers/event-seed.js';
+
 const ADAPTER = 'minecraft' as AdapterId;
 const SOURCE = 'minecraft.chat' as SourceId;
 const CANARY = 'CANARY-SH008C-正文-9f3e2a7c';
@@ -439,40 +441,26 @@ describe('ingress — dedupe without a body comparison', () => {
     const repos = createRepositories(fixture.store);
     const expiredId = eventId(7);
     const rejectedId = eventId(8);
-    repos.events.insert({
+    seedEvent(fixture.store, {
       id: expiredId,
       personaId: id,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef: 'mc-expired',
-      status: 'accepted',
-      receivedAt: 1,
-      updatedAt: 1,
-    });
-    repos.events.updateStatus({
-      personaId: id,
-      id: expiredId,
       status: 'expired',
       statusReason: 'ttl_expired',
-      attentionOutcome: null,
+      receivedAt: 1,
       updatedAt: 2,
     });
-    repos.events.insert({
+    seedEvent(fixture.store, {
       id: rejectedId,
       personaId: id,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef: 'mc-rejected',
-      status: 'received',
-      receivedAt: 1,
-      updatedAt: 1,
-    });
-    repos.events.updateStatus({
-      personaId: id,
-      id: rejectedId,
       status: 'rejected',
       statusReason: 'auth_failed',
-      attentionOutcome: null,
+      receivedAt: 1,
       updatedAt: 3,
     });
     const bus = ingress(fixture);
@@ -508,7 +496,7 @@ describe('ingress — dedupe without a body comparison', () => {
     try {
       const bus = ingress(fixture, {
         duringRead: () => {
-          createRepositories(other).events.insert({
+          seedEvent(other, {
             id: winner,
             personaId: id,
             source: SOURCE,
@@ -717,13 +705,11 @@ describe('ingress — buffer, capacity, and ttl', () => {
     if (accepted.outcome !== 'accepted') {
       throw new Error('expected accepted');
     }
-    createRepositories(fixture.store).events.updateStatus({
+    createRepositories(fixture.store).events.rejectIfActive({
       personaId: id,
       id: accepted.eventId,
-      status: 'rejected',
-      statusReason: 'processing_failed',
-      attentionOutcome: null,
       updatedAt: 2_010,
+      reason: 'processing_failed',
     });
 
     fixture.time = 2_200;
@@ -977,7 +963,7 @@ describe('ingress — isolation and robustness', () => {
     const id = persona(24);
     seedPersona(fixture.store, id);
     const taken = allocateEventId({ now: () => 5_000_000, randomBytes: () => fill(1) });
-    createRepositories(fixture.store).events.insert({
+    seedEvent(fixture.store, {
       id: taken,
       personaId: id,
       source: SOURCE,

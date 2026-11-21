@@ -37,6 +37,8 @@ import {
   type RuntimeLogger,
 } from '../src/index.js';
 
+import { seedEvent as seedEventRow } from './helpers/event-seed.js';
+
 const NOW = 1_731_700_000_000;
 
 function body(n: number): string {
@@ -117,7 +119,7 @@ function seedEvent(
   status: 'received' | 'accepted' | 'noticed' | 'understood' | 'response_committed',
   ref = `ref-${n}`,
 ): void {
-  repos(store).events.insert({
+  seedEventRow(store, {
     id: eid(n),
     personaId: pid(persona),
     source: SOURCE,

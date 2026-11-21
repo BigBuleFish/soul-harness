@@ -14,6 +14,7 @@ import { databaseOf } from '../src/db/store.js';
 import type { PersistenceError } from '../src/errors.js';
 import { createRepositories, withWrite, type Repositories } from '../src/index.js';
 import { closeAll, countRows, NOW, openMigratedStore } from './helpers/fixture.js';
+import { seedEvent } from './helpers/event-seed.js';
 
 afterEach(closeAll);
 
@@ -190,21 +191,22 @@ describe('sessions repository', () => {
 });
 
 describe('events repository', () => {
-  it('inserts with the P1 archive defaults and no way to set them', () => {
+  it('commitP1Envelope writes the P1 archive defaults and no way to set them', () => {
     const { repos } = setup();
     seedPersona(repos);
 
-    const event = repos.events.insert({
+    const event = repos.events.commitP1Envelope({
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef: 'mc-1',
-      status: 'accepted',
       receivedAt: NOW,
       updatedAt: NOW,
+      outcome: { status: 'accepted' },
     });
 
+    expect(event.status).toBe('accepted');
     expect(event.archiveRef).toBeNull();
     expect(event.archiveDisposition).toBeNull();
     expect(event.archiveState).toBe('none');
@@ -215,15 +217,15 @@ describe('events repository', () => {
   it('finds the event by its dedupe key', () => {
     const { repos } = setup();
     seedPersona(repos);
-    repos.events.insert({
+    repos.events.commitP1Envelope({
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef: 'mc-1',
-      status: 'accepted',
       receivedAt: NOW,
       updatedAt: NOW,
+      outcome: { status: 'accepted' },
     });
 
     expect(
@@ -245,42 +247,39 @@ describe('events repository', () => {
     ).toBeNull();
   });
 
-  it('updates status with an explicit reason code', () => {
+  it('expireActive closes an active event with an explicit reason code', () => {
     const { repos } = setup();
     seedPersona(repos);
-    repos.events.insert({
+    repos.events.commitP1Envelope({
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef: 'mc-1',
-      status: 'accepted',
       receivedAt: NOW,
       updatedAt: NOW,
+      outcome: { status: 'accepted' },
     });
 
-    const updated = repos.events.updateStatus({
+    const updated = repos.events.expireActive({
       personaId: PERSONA,
       id: EVENT,
-      status: 'expired',
-      statusReason: 'ttl_expired',
-      attentionOutcome: 'ignored',
       updatedAt: NOW + 5,
+      reason: 'ttl_expired',
     });
 
     expect(updated?.status).toBe('expired');
     expect(updated?.statusReason).toBe('ttl_expired');
-    expect(updated?.attentionOutcome).toBe('ignored');
     expect(updated?.updatedAt).toBe(NOW + 5);
   });
 
   it('rejects a terminal status without a reason (database CHECK)', () => {
-    const { repos } = setup();
+    const { repos, store } = setup();
     seedPersona(repos);
 
     expect(
       codeOf(() =>
-        repos.events.insert({
+        seedEvent(store, {
           id: EVENT,
           personaId: PERSONA,
           source: SOURCE,
@@ -292,20 +291,21 @@ describe('events repository', () => {
         }),
       ),
     ).toBe('check_violation');
+    expect(countRows(store, 'events')).toBe(0);
   });
 
   it('filters list results by persona and status', () => {
     const { repos } = setup();
     seedPersona(repos);
-    repos.events.insert({
+    repos.events.commitP1Envelope({
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef: 'mc-1',
-      status: 'accepted',
       receivedAt: NOW,
       updatedAt: NOW,
+      outcome: { status: 'accepted' },
     });
 
     expect(
@@ -449,15 +449,15 @@ describe('database errors are classified', () => {
 
     expect(
       codeOf(() =>
-        repos.events.insert({
+        repos.events.commitP1Envelope({
           id: EVENT,
           personaId: PERSONA,
           source: SOURCE,
           adapterId: ADAPTER,
           adapterEventRef: 'mc-1',
-          status: 'accepted',
           receivedAt: NOW,
           updatedAt: NOW,
+          outcome: { status: 'accepted' },
         }),
       ),
     ).toBe('foreign_key_violation');
@@ -500,32 +500,32 @@ describe('repository writes go through the single write entry', () => {
   });
 });
 
-describe('events.summary must be NULL in P1', () => {
-  const insert = (repos: Repositories, summary?: unknown) =>
-    repos.events.insert({
+describe('events.summary is never written through the production API', () => {
+  const commit = (repos: Repositories, summary?: unknown) =>
+    repos.events.commitP1Envelope({
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef: 'mc-1',
-      status: 'accepted',
       receivedAt: NOW,
       updatedAt: NOW,
-      ...(summary === undefined ? {} : { summary: summary as null }),
-    });
+      outcome: { status: 'accepted' },
+      ...(summary === undefined ? {} : { summary }),
+    } as never);
 
   it('stores NULL when the field is omitted', () => {
     const { repos } = setup();
     seedPersona(repos);
 
-    expect(insert(repos).summary).toBeNull();
+    expect(commit(repos).summary).toBeNull();
   });
 
   it('stores NULL when explicitly null', () => {
     const { repos } = setup();
     seedPersona(repos);
 
-    expect(insert(repos, null).summary).toBeNull();
+    expect(commit(repos, null).summary).toBeNull();
   });
 
   it.each([
@@ -533,26 +533,25 @@ describe('events.summary must be NULL in P1', () => {
     ['an empty string', ''],
     ['whitespace', '   '],
     ['keywords', 'hello,world'],
-  ])('rejects %s before touching the database', (_label, summary) => {
-    const { repos, store } = setup();
+  ])('ignores an injected %s and stores NULL', (_label, summary) => {
+    const { repos } = setup();
     seedPersona(repos);
 
-    expect(codeOf(() => insert(repos, summary))).toBe('invalid_column_value');
-    expect(countRows(store, 'events')).toBe(0);
+    expect(commit(repos, summary).summary).toBeNull();
   });
 });
 
 describe('events.adapterEventRef format is enforced at the write boundary', () => {
   const insert = (repos: Repositories, adapterEventRef: string) =>
-    repos.events.insert({
+    repos.events.commitP1Envelope({
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef,
-      status: 'accepted',
       receivedAt: NOW,
       updatedAt: NOW,
+      outcome: { status: 'accepted' },
     });
 
   it.each(['a', 'A', '0', 'mc-1', 'qq:group.1', 'x'.repeat(64), 'aB3._:-'])('accepts %j', (ref) => {

@@ -25,6 +25,7 @@ import {
 } from '../src/index.js';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { seedEvent } from './helpers/event-seed.js';
 import { dbPathIn, makeTempDir, removeTempDir } from './helpers/temp.js';
 
 const NOW = 1_731_700_000_000;
@@ -100,12 +101,11 @@ function seedSessions(store: Store): void {
 }
 
 function seedEvents(store: Store): void {
-  const r = repos(store);
   for (const [id, personaId, ref] of [
     [EVENT_A, A, 'ref-a'],
     [EVENT_B, B, 'ref-b'],
   ] as const) {
-    r.events.insert({
+    seedEvent(store, {
       id,
       personaId,
       source: SOURCE,
@@ -225,34 +225,30 @@ describe('events are persona-scoped', () => {
     expect(repos(store).events.getById({ personaId: B, id: EVENT_B })?.personaId).toBe(B);
   });
 
-  it('A cannot update B, and the row stays byte-identical', () => {
+  it('A cannot reject B, and the row stays byte-identical', () => {
     const store = openFixture();
     seedTwoPersonas(store);
     seedEvents(store);
     const before = repos(store).events.getById({ personaId: B, id: EVENT_B });
 
     expect(
-      repos(store).events.updateStatus({
+      repos(store).events.rejectIfActive({
         id: EVENT_B,
         personaId: A,
-        status: 'rejected',
-        statusReason: 'auth_failed',
-        attentionOutcome: null,
         updatedAt: NOW + 10,
+        reason: 'auth_failed',
       }),
     ).toBeNull();
     expect(repos(store).events.getById({ personaId: B, id: EVENT_B })).toStrictEqual(before);
 
     expect(
-      repos(store).events.updateStatus({
+      repos(store).events.rejectIfActive({
         id: EVENT_B,
         personaId: B,
-        status: 'rejected',
-        statusReason: 'auth_failed',
-        attentionOutcome: null,
         updatedAt: NOW + 10,
+        reason: 'auth_failed',
       }),
-    ).toMatchObject({ status: 'rejected', updatedAt: NOW + 10 });
+    ).toMatchObject({ status: 'rejected', statusReason: 'auth_failed', updatedAt: NOW + 10 });
   });
 
   it('a committed P1 envelope is readable only under its own persona', () => {
@@ -286,22 +282,22 @@ describe('event session references are persona-scoped', () => {
     }
   }
 
-  function insertEventWithSession(
+  function commitEvent(
     store: Store,
     id: EventId,
     personaId: PersonaId,
     sessionId: SessionId | null,
   ) {
-    return repos(store).events.insert({
+    return repos(store).events.commitP1Envelope({
       id,
       personaId,
+      sessionId,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef: `ref-${id}`,
-      status: 'accepted',
       receivedAt: NOW,
       updatedAt: NOW,
-      sessionId,
+      outcome: { status: 'accepted' },
     });
   }
 
@@ -310,76 +306,34 @@ describe('event session references are persona-scoped', () => {
     seedTwoPersonas(store);
     seedSessions(store);
 
-    const event = insertEventWithSession(store, `evt_${BODY}10` as EventId, A, SESSION_A);
+    const event = commitEvent(store, `evt_${BODY}10` as EventId, A, SESSION_A);
 
     expect(event).toMatchObject({ personaId: A, sessionId: SESSION_A });
-  });
-
-  it('rejects insert() when the session belongs to another persona', () => {
-    const store = openFixture();
-    seedTwoPersonas(store);
-    seedSessions(store);
-    const eventId = `evt_${BODY}11` as EventId;
-
-    expect(codeOf(() => insertEventWithSession(store, eventId, A, SESSION_B))).toBe(
-      'foreign_key_violation',
-    );
-    expect(repos(store).events.getById({ personaId: A, id: eventId })).toBeNull();
-    expect(
-      repos(store).events.listByPersonaStatus({ personaId: A, status: 'accepted' }),
-    ).toHaveLength(0);
-    // The B session is untouched and still usable by B.
-    expect(insertEventWithSession(store, `evt_${BODY}12` as EventId, B, SESSION_B)).toMatchObject({
-      sessionId: SESSION_B,
-    });
   });
 
   it('rejects commitP1Envelope() when the session belongs to another persona', () => {
     const store = openFixture();
     seedTwoPersonas(store);
     seedSessions(store);
-    const eventId = `evt_${BODY}13` as EventId;
+    const eventId = `evt_${BODY}11` as EventId;
 
-    expect(
-      codeOf(() =>
-        repos(store).events.commitP1Envelope({
-          id: eventId,
-          personaId: A,
-          sessionId: SESSION_B,
-          source: SOURCE,
-          adapterId: ADAPTER,
-          adapterEventRef: 'ref-cross-commit',
-          receivedAt: NOW,
-          updatedAt: NOW,
-          outcome: { status: 'accepted' },
-        }),
-      ),
-    ).toBe('foreign_key_violation');
+    expect(codeOf(() => commitEvent(store, eventId, A, SESSION_B))).toBe('foreign_key_violation');
     expect(repos(store).events.getById({ personaId: A, id: eventId })).toBeNull();
     expect(
       repos(store).events.listByPersonaStatus({ personaId: A, status: 'accepted' }),
     ).toHaveLength(0);
+    // The B session is untouched and still usable by B.
+    expect(commitEvent(store, `evt_${BODY}12` as EventId, B, SESSION_B)).toMatchObject({
+      sessionId: SESSION_B,
+    });
   });
 
-  it('still accepts sessionId: null for both writers', () => {
+  it('still accepts sessionId: null', () => {
     const store = openFixture();
     seedTwoPersonas(store);
 
-    const inserted = insertEventWithSession(store, `evt_${BODY}14` as EventId, A, null);
-    expect(inserted.sessionId).toBeNull();
-
-    const committed = repos(store).events.commitP1Envelope({
-      id: `evt_${BODY}15` as EventId,
-      personaId: A,
-      sessionId: null,
-      source: SOURCE,
-      adapterId: ADAPTER,
-      adapterEventRef: 'ref-null-commit',
-      receivedAt: NOW,
-      updatedAt: NOW,
-      outcome: { status: 'accepted' },
-    });
-    expect(committed.sessionId).toBeNull();
+    expect(commitEvent(store, `evt_${BODY}14` as EventId, A, null).sessionId).toBeNull();
+    expect(commitEvent(store, `evt_${BODY}15` as EventId, B, null).sessionId).toBeNull();
   });
 
   it('keeps foreign_key_violation for a session that does not exist, without leaving a row', () => {
@@ -387,32 +341,10 @@ describe('event session references are persona-scoped', () => {
     seedTwoPersonas(store);
     seedSessions(store);
     const missing = `ses_${BODY}09` as SessionId;
+    const eventId = `evt_${BODY}16` as EventId;
 
-    expect(
-      codeOf(() => insertEventWithSession(store, `evt_${BODY}16` as EventId, A, missing)),
-    ).toBe('foreign_key_violation');
-    expect(
-      codeOf(() =>
-        repos(store).events.commitP1Envelope({
-          id: `evt_${BODY}17` as EventId,
-          personaId: A,
-          sessionId: missing,
-          source: SOURCE,
-          adapterId: ADAPTER,
-          adapterEventRef: 'ref-missing-session',
-          receivedAt: NOW,
-          updatedAt: NOW,
-          outcome: { status: 'accepted' },
-        }),
-      ),
-    ).toBe('foreign_key_violation');
-
-    expect(
-      repos(store).events.getById({ personaId: A, id: `evt_${BODY}16` as EventId }),
-    ).toBeNull();
-    expect(
-      repos(store).events.getById({ personaId: A, id: `evt_${BODY}17` as EventId }),
-    ).toBeNull();
+    expect(codeOf(() => commitEvent(store, eventId, A, missing))).toBe('foreign_key_violation');
+    expect(repos(store).events.getById({ personaId: A, id: eventId })).toBeNull();
     expect(
       repos(store).events.listByPersonaStatus({ personaId: A, status: 'accepted' }),
     ).toHaveLength(0);

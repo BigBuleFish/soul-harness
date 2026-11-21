@@ -73,64 +73,10 @@ const COLUMNS = [
   'status_reason',
 ].join(', ');
 
-export interface InsertEventInput {
-  readonly id: EventId;
-  readonly personaId: PersonaId;
-  readonly sessionId?: SessionId | null;
-  readonly source: SourceId;
-  readonly adapterId: AdapterId;
-  readonly adapterEventRef: string;
-  readonly status: EventStatus;
-  readonly attentionOutcome?: AttentionOutcome | null;
-  readonly salience?: number;
-  /**
-   * P1 stores no summary at all (DATA-MODEL §3.1): the column may only be NULL.
-   * The type carries that restriction, and `assertInsertInput` re-checks it at
-   * runtime because JavaScript callers bypass the type.
-   */
-  readonly summary?: null;
-  readonly receivedAt: number;
-  readonly occurredAt?: number | null;
-  readonly updatedAt: number;
-}
-
-/**
- * Rejects anything the database would accept but the data model forbids.
- *
- * Both checks run BEFORE the write transaction opens, so a rejected call leaves
- * the database untouched.
- */
-function assertInsertInput(input: InsertEventInput): void {
-  if (input.summary !== undefined && input.summary !== null) {
-    throw new PersistenceError(
-      'invalid_column_value',
-      'events.summary must be NULL in P1; summaries are content, not metadata',
-      { details: { column: 'summary' } },
-    );
-  }
-  if (!isAdapterEventRef(input.adapterEventRef)) {
-    throw new PersistenceError(
-      'invalid_identifier',
-      'adapterEventRef must match ^[A-Za-z0-9._:-]{1,64}$',
-      { details: { field: 'adapterEventRef' } },
-    );
-  }
-}
-
 /** Persona-scoped event identity (IDENTITY-PROTOCOL §1.5). */
 export interface ScopedEventId {
   readonly personaId: PersonaId;
   readonly id: EventId;
-}
-
-export interface UpdateEventStatusInput {
-  readonly id: EventId;
-  readonly personaId: PersonaId;
-  readonly status: EventStatus;
-  /** Must be non-null exactly for the terminal statuses (DATA-MODEL §3.4). */
-  readonly statusReason: StatusReason | null;
-  readonly attentionOutcome: AttentionOutcome | null;
-  readonly updatedAt: number;
 }
 
 /**
@@ -385,42 +331,6 @@ function assertSessionOwnedByPersona(
 
 export function createEventRepository(store: Store) {
   return {
-    insert(input: InsertEventInput): EventRow {
-      assertInsertInput(input);
-
-      return withWrite(store, (tx) => {
-        assertSessionOwnedByPersona(tx, input.sessionId, input.personaId);
-        // Archive columns are intentionally absent: P1 has no Archive Writer.
-        tx.prepare(
-          `INSERT INTO events
-             (id, persona_id, session_id, source, adapter_id, adapter_event_ref, status,
-              attention_outcome, salience, summary, received_at, occurred_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          input.id,
-          input.personaId,
-          input.sessionId ?? null,
-          input.source,
-          input.adapterId,
-          input.adapterEventRef,
-          input.status,
-          input.attentionOutcome ?? null,
-          input.salience ?? 0,
-          input.summary ?? null,
-          input.receivedAt,
-          input.occurredAt ?? null,
-          input.updatedAt,
-        );
-
-        const created = selectById(tx, input.personaId, input.id);
-        // Unreachable in practice: the row was inserted in this transaction.
-        if (created === null) {
-          throw new Error('event insert did not produce a row');
-        }
-        return created;
-      });
-    },
-
     getById(input: ScopedEventId): EventRow | null {
       if (!isPersonaId(input.personaId)) {
         throw new PersistenceError('invalid_argument', 'personaId must be a PersonaId', {
@@ -454,38 +364,6 @@ export function createEventRepository(store: Store) {
         input.adapterEventRef,
       );
       return raw === undefined ? null : mapEvent(raw);
-    },
-
-    /** Returns the updated row, or null when no event has that (persona, id). */
-    updateStatus(input: UpdateEventStatusInput): EventRow | null {
-      if (!isPersonaId(input.personaId)) {
-        throw new PersistenceError('invalid_argument', 'personaId must be a PersonaId', {
-          details: { field: 'personaId' },
-        });
-      }
-      if (!isEventId(input.id)) {
-        throw new PersistenceError('invalid_argument', 'id must be an EventId', {
-          details: { field: 'id' },
-        });
-      }
-      return withWrite(store, (tx) => {
-        const changes = tx
-          .prepare(
-            `UPDATE events
-             SET status = ?, status_reason = ?, attention_outcome = ?, updated_at = ?
-             WHERE id = ? AND persona_id = ?`,
-          )
-          .run(
-            input.status,
-            input.statusReason,
-            input.attentionOutcome,
-            input.updatedAt,
-            input.id,
-            input.personaId,
-          ).changes;
-
-        return Number(changes) === 0 ? null : selectById(tx, input.personaId, input.id);
-      });
     },
 
     /** Uses `ix_events_persona_status`. */

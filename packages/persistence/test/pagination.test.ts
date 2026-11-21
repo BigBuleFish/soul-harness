@@ -21,6 +21,7 @@ import { databaseOf } from '../src/db/store.js';
 import { PersistenceError } from '../src/errors.js';
 import { createPersonaRepository } from '../src/repositories/personas.js';
 import { createRepositories, migrate, openStore, withRead, type Store } from '../src/index.js';
+import { seedEvent } from './helpers/event-seed.js';
 import { dbPathIn, makeTempDir, removeTempDir } from './helpers/temp.js';
 
 const NOW = 1_731_700_000_000;
@@ -109,7 +110,7 @@ function insertEvent(
     readonly status: EventStatus;
   },
 ): void {
-  createRepositories(store).events.insert({
+  seedEvent(store, {
     id: input.id,
     personaId: input.personaId,
     source: SOURCE,
@@ -486,7 +487,6 @@ describe('events.listPageByPersonaStatus', () => {
       insertEvent(pair.a, { id, personaId: EVENT_PERSONA, status: 'received' });
     }
     const reader = createRepositories(pair.a).events;
-    const writer = createRepositories(pair.b).events;
     const collected: EventId[] = [];
 
     withRead(pair.a, () => {
@@ -497,7 +497,7 @@ describe('events.listPageByPersonaStatus', () => {
       });
       expect(eventIdsOf(page1)).toStrictEqual(ids.slice(0, 4));
 
-      writer.insert({
+      seedEvent(pair.b, {
         id: inserted,
         personaId: EVENT_PERSONA,
         source: SOURCE,

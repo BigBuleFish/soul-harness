@@ -47,11 +47,9 @@ export type {
   CommitP1EventInput,
   EventRepository,
   ExpireActiveEventInput,
-  InsertEventInput,
   RejectActiveEventInput,
   P1CommitOutcome,
   ScopedEventId,
-  UpdateEventStatusInput,
 } from './events.js';
 
 export { createTaskRepository } from './tasks.js';

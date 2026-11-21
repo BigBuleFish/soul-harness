@@ -11,7 +11,8 @@ import { join } from 'node:path';
 import type { AdapterId, EventId, PersonaId, SessionId, SourceId } from '@soul-harness/contracts';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { databaseOf } from '../src/db/store.js';
+import { databaseOf, type Store } from '../src/db/store.js';
+import { seedEvent, type SeedEventInput } from './helpers/event-seed.js';
 import { isPersistenceError } from '../src/errors.js';
 import { createRepositories } from '../src/index.js';
 import type { Repositories } from '../src/index.js';
@@ -30,8 +31,21 @@ const ADAPTER = 'minecraft' as AdapterId;
 const ADAPTER_B = 'qq' as AdapterId;
 const SOURCE = 'minecraft.chat' as SourceId;
 
+const storeOf = new WeakMap<Repositories, Store>();
+
 function repos(): Repositories {
-  return createRepositories(openMigratedStore());
+  const store = openMigratedStore();
+  const created = createRepositories(store);
+  storeOf.set(created, store);
+  return created;
+}
+
+function seed(storeRepos: Repositories, input: SeedEventInput) {
+  const store = storeOf.get(storeRepos);
+  if (store === undefined) {
+    throw new Error('seed() requires repositories opened through repos()');
+  }
+  return seedEvent(store, input);
 }
 
 function seedPersona(storeRepos: Repositories, id: PersonaId = PERSONA): void {
@@ -191,6 +205,7 @@ describe('sessions.openActive', () => {
   it('rejects an illegal external id before opening a transaction', () => {
     const store = openMigratedStore();
     const storeRepos = createRepositories(store);
+    storeOf.set(storeRepos, store);
     seedPersona(storeRepos);
     const before = databaseOf(store).prepare('SELECT count(*) AS n FROM sessions').get() as {
       n: number;
@@ -334,6 +349,7 @@ describe('events.commitP1Envelope', () => {
   it('rejects a malformed adapter reference before writing', () => {
     const store = openMigratedStore();
     const storeRepos = createRepositories(store);
+    storeOf.set(storeRepos, store);
     seedPersona(storeRepos);
 
     expect(
@@ -380,7 +396,7 @@ describe('events.expireActive', () => {
   it('expires an accepted P1 event with ttl_expired and leaves other fields', () => {
     const storeRepos = repos();
     seedPersona(storeRepos);
-    storeRepos.events.insert({
+    seed(storeRepos, {
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
@@ -412,25 +428,18 @@ describe('events.expireActive', () => {
     const storeRepos = repos();
     seedPersona(storeRepos);
     seedPersona(storeRepos, PERSONA_B);
-    storeRepos.events.insert({
+    seed(storeRepos, {
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef: 'mc-rejected',
-      status: 'received',
-      receivedAt: NOW,
-      updatedAt: NOW,
-    });
-    storeRepos.events.updateStatus({
-      personaId: PERSONA,
-      id: EVENT,
       status: 'rejected',
       statusReason: 'auth_failed',
-      attentionOutcome: null,
+      receivedAt: NOW,
       updatedAt: NOW + 1,
     });
-    storeRepos.events.insert({
+    seed(storeRepos, {
       id: EVENT_B,
       personaId: PERSONA_B,
       source: SOURCE,
@@ -473,8 +482,9 @@ describe('events.expireActive', () => {
   it('does not expire a non-none archive state', () => {
     const store = openMigratedStore();
     const storeRepos = createRepositories(store);
+    storeOf.set(storeRepos, store);
     seedPersona(storeRepos);
-    storeRepos.events.insert({
+    seed(storeRepos, {
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
@@ -506,7 +516,7 @@ describe('events.expireActive', () => {
   it('rejects an illegal reason or persona id before writing', () => {
     const storeRepos = repos();
     seedPersona(storeRepos);
-    storeRepos.events.insert({
+    seed(storeRepos, {
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
@@ -548,7 +558,7 @@ describe('events.rejectIfActive', () => {
   it('rejects an accepted P1 event with processing_failed', () => {
     const storeRepos = repos();
     seedPersona(storeRepos);
-    storeRepos.events.insert({
+    seed(storeRepos, {
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
@@ -580,25 +590,18 @@ describe('events.rejectIfActive', () => {
     const storeRepos = repos();
     seedPersona(storeRepos);
     seedPersona(storeRepos, PERSONA_B);
-    storeRepos.events.insert({
+    seed(storeRepos, {
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
       adapterId: ADAPTER,
       adapterEventRef: 'mc-expired',
-      status: 'received',
-      receivedAt: NOW,
-      updatedAt: NOW,
-    });
-    storeRepos.events.updateStatus({
-      personaId: PERSONA,
-      id: EVENT,
       status: 'expired',
       statusReason: 'ttl_expired',
-      attentionOutcome: null,
+      receivedAt: NOW,
       updatedAt: NOW + 1,
     });
-    storeRepos.events.insert({
+    seed(storeRepos, {
       id: EVENT_B,
       personaId: PERSONA_B,
       source: SOURCE,
@@ -638,8 +641,9 @@ describe('events.rejectIfActive', () => {
   it('does not reject a non-none archive state', () => {
     const store = openMigratedStore();
     const storeRepos = createRepositories(store);
+    storeOf.set(storeRepos, store);
     seedPersona(storeRepos);
-    storeRepos.events.insert({
+    seed(storeRepos, {
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,
@@ -670,7 +674,7 @@ describe('events.rejectIfActive', () => {
   it('rejects an expiry reason before writing', () => {
     const storeRepos = repos();
     seedPersona(storeRepos);
-    storeRepos.events.insert({
+    seed(storeRepos, {
       id: EVENT,
       personaId: PERSONA,
       source: SOURCE,

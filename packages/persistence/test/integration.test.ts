@@ -34,6 +34,7 @@ import {
 } from '../src/index.js';
 import { setReadGuardFaultForTests } from '../src/tx/read-guard-fault.js';
 import { closeAll, NOW, openMigratedStore } from './helpers/fixture.js';
+import { seedEvent } from './helpers/event-seed.js';
 import { dbPathIn, makeTempDir, removeTempDir } from './helpers/temp.js';
 
 const PERSONA = 'psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC' as PersonaId;
@@ -121,7 +122,7 @@ describe('whole package, real file, two process lifetimes', () => {
       externalId: 'mc:one',
       openedAt: NOW,
     });
-    repos.events.insert({
+    seedEvent(first, {
       id: EVENT,
       personaId: PERSONA,
       sessionId: SESSION,
@@ -247,7 +248,7 @@ describe('transaction boundaries hold when repositories are combined', () => {
       externalId: 'mc:one',
       openedAt: NOW,
     });
-    repos.events.insert({
+    seedEvent(store, {
       id: EVENT,
       personaId: PERSONA,
       sessionId: SESSION,
@@ -265,13 +266,11 @@ describe('transaction boundaries hold when repositories are combined', () => {
       updatedAt: NOW + 1,
     });
     repos.personas.updateState({ id: PERSONA, state: 'SUSPENDED', updatedAt: NOW + 2 });
-    repos.events.updateStatus({
-      personaId: PERSONA,
+    repos.events.expireActive({
       id: EVENT,
-      status: 'expired',
-      statusReason: 'ttl_expired',
-      attentionOutcome: 'ignored',
+      personaId: PERSONA,
       updatedAt: NOW + 3,
+      reason: 'ttl_expired',
     });
     repos.tasks.insertQueuedTask({
       id: TASK,
@@ -314,15 +313,15 @@ describe('transaction boundaries hold when repositories are combined', () => {
     withWrite(store, () => {
       expect(
         codeOf(() =>
-          repos.events.insert({
+          repos.events.commitP1Envelope({
             id: EVENT,
             personaId: PERSONA,
             source: SOURCE,
             adapterId: ADAPTER,
             adapterEventRef: 'mc-1',
-            status: 'accepted',
             receivedAt: NOW,
             updatedAt: NOW,
+            outcome: { status: 'accepted' },
           }),
         ),
       ).toBe('nested_write');

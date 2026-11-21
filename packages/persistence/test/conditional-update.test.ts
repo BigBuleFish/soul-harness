@@ -13,7 +13,8 @@ import type { AdapterId, EventId, PersonaId, SourceId } from '@soul-harness/cont
 
 import { databaseOf } from '../src/db/store.js';
 import { PersistenceError } from '../src/errors.js';
-import { createRepositories } from '../src/index.js';
+import { createRepositories, type Store } from '../src/index.js';
+import { seedEvent } from './helpers/event-seed.js';
 import { closeAll, NOW, openMigratedStore } from './helpers/fixture.js';
 
 afterEach(closeAll);
@@ -40,14 +41,14 @@ function seedPersona(store: ReturnType<typeof openMigratedStore>) {
 }
 
 function insertEvent(
-  repos: ReturnType<typeof createRepositories>,
+  store: Store,
   id: EventId,
   ref: string,
   status: 'received' | 'accepted' | 'acted',
   attentionOutcome: 'not_evaluated' | 'queued' | 'fully_aware' | null,
   personaId: PersonaId = PERSONA,
 ) {
-  return repos.events.insert({
+  return seedEvent(store, {
     id,
     personaId,
     source: SOURCE,
@@ -137,7 +138,7 @@ describe('events.expireIfActive', () => {
   it('B4 expires a received event and leaves attention_outcome alone', () => {
     const store = openMigratedStore();
     const { repos } = seedPersona(store);
-    const event = insertEvent(repos, EVENT_1, 'ref-received', 'received', 'queued');
+    const event = insertEvent(store, EVENT_1, 'ref-received', 'received', 'queued');
 
     const result = repos.events.expireIfActive({
       id: EVENT_1,
@@ -162,7 +163,7 @@ describe('events.expireIfActive', () => {
   it('B5 expires an accepted event', () => {
     const store = openMigratedStore();
     const { repos } = seedPersona(store);
-    insertEvent(repos, EVENT_2, 'ref-accepted', 'accepted', null);
+    insertEvent(store, EVENT_2, 'ref-accepted', 'accepted', null);
 
     const result = repos.events.expireIfActive({
       id: EVENT_2,
@@ -184,25 +185,31 @@ describe('events.expireIfActive', () => {
     const store = openMigratedStore();
     const { repos } = seedPersona(store);
 
-    const acted = insertEvent(repos, EVENT_1, 'ref-acted', 'acted', 'fully_aware');
+    const acted = insertEvent(store, EVENT_1, 'ref-acted', 'acted', 'fully_aware');
 
-    insertEvent(repos, EVENT_2, 'ref-rejected', 'received', null);
-    const rejected = repos.events.updateStatus({
-      personaId: PERSONA,
+    const rejected = seedEvent(store, {
       id: EVENT_2,
+      personaId: PERSONA,
+      source: SOURCE,
+      adapterId: ADAPTER,
+      adapterEventRef: 'ref-rejected',
       status: 'rejected',
       statusReason: 'auth_failed',
       attentionOutcome: null,
+      receivedAt: NOW,
       updatedAt: NOW + 5,
     });
 
-    insertEvent(repos, EVENT_3, 'ref-expired', 'received', null);
-    const expired = repos.events.updateStatus({
-      personaId: PERSONA,
+    const expired = seedEvent(store, {
       id: EVENT_3,
+      personaId: PERSONA,
+      source: SOURCE,
+      adapterId: ADAPTER,
+      adapterEventRef: 'ref-expired',
       status: 'expired',
       statusReason: 'buffer_lost',
       attentionOutcome: null,
+      receivedAt: NOW,
       updatedAt: NOW + 6,
     });
 
@@ -238,7 +245,7 @@ describe('events.expireIfActive', () => {
       createdAt: NOW,
       updatedAt: NOW,
     });
-    const ownedByB = insertEvent(repos, EVENT_1, 'ref-b', 'received', 'queued', PERSONA_B);
+    const ownedByB = insertEvent(store, EVENT_1, 'ref-b', 'received', 'queued', PERSONA_B);
 
     // Persona A's scope must not reach Persona B's row, even though the id
     // exists and the row is otherwise eligible (received, archive_state none).
@@ -280,7 +287,7 @@ describe('events.expireIfActive', () => {
     (archiveState, status) => {
       const store = openMigratedStore();
       const { repos } = seedPersona(store);
-      const before = insertEvent(repos, EVENT_1, `ref-${archiveState}`, status, 'queued');
+      const before = insertEvent(store, EVENT_1, `ref-${archiveState}`, status, 'queued');
       const written = databaseOf(store)
         .prepare('UPDATE events SET archive_state = ? WHERE id = ?')
         .run(archiveState, EVENT_1);
@@ -304,7 +311,7 @@ describe('events.expireIfActive', () => {
   it('B9 rejects a personaId that is not a persona id before writing', () => {
     const store = openMigratedStore();
     const { repos } = seedPersona(store);
-    insertEvent(repos, EVENT_1, 'ref-bad-scope', 'received', 'queued');
+    insertEvent(store, EVENT_1, 'ref-bad-scope', 'received', 'queued');
 
     for (const personaId of ['', 'not-a-persona', EVENT_1]) {
       expect(

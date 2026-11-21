@@ -84,7 +84,6 @@ export type {
   ExpireActiveEventInput,
   FailExhaustedTaskInput,
   FailTaskInput,
-  InsertEventInput,
   InsertQueuedTaskInput,
   ListTaskPageInput,
   NextDueTaskQuery,
@@ -109,7 +108,6 @@ export type {
   TaskAttemptFilter,
   TaskPayloadRefs,
   TaskRepository,
-  UpdateEventStatusInput,
   UpdatePersonaStateInput,
   UpsertRuntimeStateInput,
 } from './repositories/index.js';
