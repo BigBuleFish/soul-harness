@@ -13,7 +13,7 @@ DSH / Minecraft / QQ / CLI 都是**可选适配器**；不安装它们，Daemon 
 **P0：架构冻结与工程规范。** 文档主体已完成；`packages/contracts` 已落地（SH-004）；
 Monorepo 根工程化已完成（SH-005）。
 
-**P1 进行中。** `packages/persistence` 的 SH-006A–D 已完成；其后还有已合并的 SH-008P、SH-008C 存储原语和 SH-008D D1 任务状态机（D1.R1 已通过独立复审），这些不另计为 SH-006 的再次验收，也不等于 SH-008D 整批验收。`apps/soul-daemon` 的生命周期与装配层已完成（SH-007A）。`packages/runtime` 已有 ID 分配、进程内 Persona 生命周期、进程内 P1 Ingress、P1 `recoverRuntime` 和 Scheduler。D2.R1–R4 已实施，整体尚未正式关闭。D3 Scheduler 的代码已提交，D3.R1 已通过独立复审。
+**P1 进行中。** `packages/persistence` 的 SH-006A–D 已完成；其后还有已合并的 SH-008P 的分页与条件写原语、SH-008C 所用的会话复用与 P1 信封提交，以及 SH-008D D1 任务状态机（D1.R1 已通过独立复审），这些不另计为 SH-006 的再次验收，也不等于 SH-008D 整批验收。`apps/soul-daemon` 的生命周期与装配层已完成（SH-007A）。`packages/runtime` 已有 ID 分配、进程内 Persona 生命周期、进程内 P1 Ingress、P1 `recoverRuntime` 和 Scheduler。D2.R1–R4 已实施，整体尚未正式关闭。D3 Scheduler 的代码已提交，D3.R1 已通过独立复审。
 **D4 与 SH-008E 尚未开始。扫描 A/B、检查点编排、API/WebSocket 仍未实现。Daemon 尚未装配 Runtime：启动不会创建 Scheduler，也不会调用人格归一、`recoverRuntime` 或 Ingress。**
 
 | 阶段 | 内容 | 状态 |
@@ -70,7 +70,7 @@ Monorepo 根工程化已完成（SH-005）。
 | 包 | 内容 | 状态 |
 |---|---|---|
 | [packages/contracts](packages/contracts/README.md) | 协议类型、10 份已注册 JSON Schema、枚举与标识符格式；双层信封（适配器输入层 / Ingress 归一化层）、零运行时依赖、无 IO、不生成 ID | **已实现（协议层，SH-004）**，含测试与正反 fixtures |
-| [packages/persistence](packages/persistence/README.md) | SQLite（WAL、单写入者）、Migration、事务协调器、六表 Repository、字段映射、Runtime checkpoint envelope 存取；其后另有 SH-008P / SH-008C 存储原语与 SH-008D D1 任务状态机 | **SH-006A–D 已完成**。后续提交不另计为 SH-006 验收。不重建 Runtime；无显式 `PRAGMA wal_checkpoint` |
+| [packages/persistence](packages/persistence/README.md) | SQLite（WAL、单写入者）、Migration、事务协调器、六表 Repository、字段映射、Runtime checkpoint envelope 存取；其后另有 SH-008P 的分页与条件写原语、SH-008C 所用的会话复用与 P1 信封提交，以及 SH-008D D1 任务状态机 | **SH-006A–D 已完成**。后续提交不另计为 SH-006 验收。不重建 Runtime；无显式 `PRAGMA wal_checkpoint` |
 | [packages/runtime](packages/runtime/README.md) | 六类核心 ID 与辅助 ID（`tsk` / `cnf`）分配；进程内 Persona 生命周期；进程内 P1 Ingress；P1 `recoverRuntime`；进程内 Scheduler。无裸 SQL | **A / B：代码层面已交付。C：代码已合并。D1.R1 与 D3.R1：独立复审通过。D2：代码已实施，整体未正式关闭。D4 未开始，整批未验收。** 无扫描 A/B、无检查点编排。Daemon 未装配，不启动 Scheduler |
 | [apps/soul-daemon](apps/soul-daemon/README.md) | 配置、结构化日志、数据目录、单实例锁、打开 SQLite、Migration、启停状态机 | **已完成（SH-007A）**。不调用 Persona Recovery、Runtime Recovery、Event Bus 或 Scheduler。API 未实现 |
 

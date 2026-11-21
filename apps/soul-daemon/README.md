@@ -158,7 +158,7 @@ SH-007A 已完成。上表归属不因 SH-007B 改变：Persona Recovery、Runti
 ## 8. 测试
 
 ```bash
-pnpm --filter @soul-harness/soul-daemon test          # 37 项
+pnpm --filter @soul-harness/soul-daemon test          # 61 项
 pnpm test                                             # 全仓（含本应用）
 ```
 
@@ -167,6 +167,8 @@ pnpm test                                             # 全仓（含本应用）
 | `test/config.test.ts` | 缺配置、空值、相对路径解析、非法日志级别/超时、默认值 |
 | `test/logger.test.ts` | JSON 行格式、敏感键打码（含嵌套）、错误不带堆栈、级别过滤 |
 | `test/lock.test.ts` | 原子创建、同目录拒绝、不同目录独立、幂等/持有者校验、损坏锁拒绝、活锁拒绝、死锁接管、抢占唯一性 |
+| `test/lock-race.test.ts` | 陈旧锁接管竞态（真实进程）：多个竞争者恰好一个胜出；胜者持锁时后来者被拒绝 |
+| `test/child-watch.test.ts` | 子进程观察器：spawn 失败不挂起；runtime error 不算 close；超时是清理失败；批量清理等待每一个子进程 |
 | `test/daemon.test.ts` | 启动到 RUNNING、阶段顺序、未实现阶段如实报告、锁竞争不建库、数据目录失败、Migration 失败清理、启动中停止、关闭顺序、清理失败上报、重启幂等 |
 | `test/process.test.ts` | 真实进程：退出码 2/3/4/5、信号优雅停止、双实例拒绝、不同目录并存、崩溃后残留锁接管与 SQLite 重开、活 PID 锁拒绝 |
 
