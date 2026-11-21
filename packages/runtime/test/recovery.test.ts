@@ -22,6 +22,7 @@ import {
   createRepositories,
   migrate,
   openStore,
+  withRead,
   withWrite,
   type Store,
 } from '@soul-harness/persistence';
@@ -133,6 +134,15 @@ function mutate(store: Store, sql: string, ...params: readonly (string | number 
   withWrite(store, (tx) => {
     tx.prepare(sql).run(...params);
   });
+}
+
+/**
+ * Reads a row that `getById` cannot materialize: an INTEGER above
+ * `Number.MAX_SAFE_INTEGER` makes the driver throw on conversion, so the test
+ * compares it inside SQL instead of pulling it back as a JavaScript number.
+ */
+function rawGet<T>(store: Store, sql: string, ...params: readonly (string | number | null)[]) {
+  return withRead(store, (tx) => tx.prepare(sql).get(...params) as T | undefined);
 }
 
 function claimRunning(store: Store, n = 1, persona = 1): void {
@@ -612,6 +622,46 @@ describe('recoverRuntime — task state handling', () => {
     const report = await recover(store);
 
     expect(report.incomplete?.reason).toBe('invalid_task_row');
+  });
+
+  it('U1: an integer-valued attempt above the safe range fails closed', async () => {
+    const { store } = openFixture();
+    seedPersona(store, 1);
+    seedTask(store, 1);
+    claimRunning(store, 1);
+    // 1e20 is integer-valued but not a safe integer; SQLite stores it as REAL,
+    // so the row stays readable and reaches the field validation directly.
+    mutate(store, 'UPDATE tasks SET attempt = ? WHERE id = ?', 1e20, tid(1));
+
+    const report = await recover(store);
+
+    expect(report.incomplete?.reason).toBe('invalid_task_row');
+    expect(report.tasks).toStrictEqual({ requeued: 0, failed: 0 });
+    expect(taskState(store, 1)).toMatchObject({ state: 'running', runId: rid(1), attempt: 1e20 });
+  });
+
+  it('U1: an INTEGER attempt above MAX_SAFE fails closed instead of escaping as a driver error', async () => {
+    const { store } = openFixture();
+    seedPersona(store, 1);
+    seedTask(store, 1);
+    claimRunning(store, 1);
+    // 2^53 fits int64, so SQLite stores it as INTEGER; reading it back as a
+    // JavaScript number throws RangeError. Recovery must still fail closed.
+    mutate(store, 'UPDATE tasks SET attempt = ? WHERE id = ?', 9_007_199_254_740_992, tid(1));
+
+    const report = await recover(store);
+
+    expect(report.incomplete?.reason).toBe('invalid_task_row');
+    expect(report.tasks).toStrictEqual({ requeued: 0, failed: 0 });
+    const after = rawGet<{ state: string; attempt_unchanged: number; run_unchanged: number }>(
+      store,
+      'SELECT state AS state, attempt = 9007199254740992 AS attempt_unchanged, run_id = ? AS run_unchanged FROM tasks WHERE id = ?',
+      rid(1),
+      tid(1),
+    );
+    expect(after?.state).toBe('running');
+    expect(after?.attempt_unchanged).toBe(1);
+    expect(after?.run_unchanged).toBe(1);
   });
 
   it('U1: a null started_at fails closed', async () => {

@@ -389,7 +389,7 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
     if (row.runId === null || !isRunId(row.runId)) {
       return 'run_id';
     }
-    if (typeof row.attempt !== 'number' || !Number.isInteger(row.attempt) || row.attempt < 1) {
+    if (typeof row.attempt !== 'number' || !Number.isSafeInteger(row.attempt) || row.attempt < 1) {
       return 'attempt';
     }
     if (!Number.isSafeInteger(row.startedAt) || Number(row.startedAt) < 0) {
@@ -428,6 +428,32 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
 
   // ---------------------------------------------------------------- generic paging
 
+  /**
+   * Reads one task page.
+   *
+   * A row whose INTEGER column exceeds `Number.MAX_SAFE_INTEGER` cannot be
+   * materialized by the SQLite driver: reading it throws `RangeError` (verified
+   * on Node 24). Such a row already violates the "attempt is a safe integer"
+   * invariant, so it is fail-closed as `invalid_task_row` instead of escaping as
+   * a driver error. Other errors are re-thrown untouched.
+   */
+  const readTaskPage = (
+    fetch: (limit: number, afterId: TaskId | undefined) => readonly TaskRow[],
+    limit: number,
+    cursor: TaskId | undefined,
+    personaId: PersonaId,
+  ): readonly TaskRow[] | null => {
+    try {
+      return fetch(limit, cursor);
+    } catch (error) {
+      if (error instanceof RangeError) {
+        abort('invalid_task_row', { personaId });
+        return null;
+      }
+      throw error;
+    }
+  };
+
   const pageTasks = (
     personaId: PersonaId,
     unit: UnitId,
@@ -455,7 +481,11 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
         mark(personaId, unit, false, cursor);
         return;
       }
-      const page = fetch(limit, cursor);
+      const page = readTaskPage(fetch, limit, cursor, personaId);
+      if (page === null) {
+        mark(personaId, unit, false, cursor);
+        return;
+      }
       state.rows += page.length;
       for (const row of page) {
         onRow(row);
