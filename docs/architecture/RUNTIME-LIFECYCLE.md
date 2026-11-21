@@ -1,7 +1,7 @@
 # RUNTIME-LIFECYCLE — 运行时生命周期
 
 - **地位**：Daemon、Persona、Thought、Event、Sleep 的状态机与启停顺序权威描述。
-- **状态**：下表是目标顺序，不是完成清单。SH-007A 只实现了基础设施半段（配置、日志、数据目录、单实例锁、打开 SQLite、Migration、Schema 校验、启停状态机）。`packages/runtime` 里已经有进程内 Persona 生命周期（SH-008B）、进程内 P1 Ingress（SH-008C）、P1 `recoverRuntime`（SH-008D D2：D2.R1–R4 已实施，整体尚未正式关闭）和 `createScheduler`（SH-008D D3，D3.R1 已通过独立复审）。D4 未开始，SH-008D 整批未验收。Daemon 不调用它们：Persona Recovery、Runtime Recovery、Event Bus、Scheduler 的装配属于尚未开始的 SH-008E。API（SH-009）没有开始。进入 `RUNNING` 只表示进程持有数据库与锁，人格认知循环没有运行。
+- **状态**：下表是目标顺序，不是完成清单。SH-007A 只实现了基础设施半段（配置、日志、数据目录、单实例锁、打开 SQLite、Migration、Schema 校验、启停状态机）。`packages/runtime` 里已经有进程内 Persona 生命周期（SH-008B）、进程内 P1 Ingress（SH-008C）、P1 `recoverRuntime`（SH-008D D2：D2.R1–R4 已通过最终独立代码复审）和 `createScheduler`（SH-008D D3，D3.R1 已通过独立复审）。D4 已完成集成验证与文档收尾，等待独立复审；D4 复审通过前 SH-008D 整批不验收。Daemon 不调用它们：Persona Recovery、Runtime Recovery、Event Bus、Scheduler 的装配属于尚未开始的 SH-008E。API（SH-009）没有开始。进入 `RUNNING` 只表示进程持有数据库与锁，人格认知循环没有运行。
 - **实现注记**：状态名在已落地的 Daemon 代码中是集中常量，不得在新代码里散落同义字符串。
 
 ---
@@ -40,9 +40,9 @@
 > | 步骤 | 包内已有的代码 | Daemon 今天实际做的事 |
 > |---|---|---|
 > | 7 恢复 Persona | `normalizeCrashedPersonas`（SH-008B）：只把其它 boot 留下的 `STARTING` / `STOPPING` 收成 `STOPPED`，不自动 start | `persona_recovery` 仍是 `not_implemented`。独占 `RECOVERING`、且先于本 boot 的启停，属于未开始的 SH-008E |
-> | 8 恢复 Runtime | `recoverRuntime`（SH-008D D2，D2.R1–R4 已实施，整体尚未正式关闭）：P1 崩溃收敛。合法 `running` 任务按 §4 的 D-RT1 退回 `queued` 或转 `failed`；`received` / `accepted` 且 `archive_state='none'` 收成 `expired` + `buffer_lost`。不读检查点，不恢复队列或活跃思维，不领取任务 | `runtime_recovery` 仍是 `not_implemented`，注释仍写检查点 / 队列 / 思维。装配属于 SH-008E，未开始 |
+> | 8 恢复 Runtime | `recoverRuntime`（SH-008D D2，D2.R1–R4 已通过最终独立代码复审）：P1 崩溃收敛。合法 `running` 任务按 §4 的 D-RT1 退回 `queued` 或转 `failed`；`received` / `accepted` 且 `archive_state='none'` 收成 `expired` + `buffer_lost`。不读检查点，不恢复队列或活跃思维，不领取任务 | `runtime_recovery` 仍是 `not_implemented`，注释仍写检查点 / 队列 / 思维。装配属于 SH-008E，未开始 |
 > | 9 Event Bus | 进程内 P1 Ingress（SH-008C）：`createStimulusIngress` / `acceptStimulus`。无 HTTP | `event_bus` 仍是 `not_implemented`。装配属于 SH-008E，未开始 |
-> | 10 Scheduler | `createScheduler`（SH-008D D3，`52549e9`，D3.R1 `86eab59` 已通过独立复审）。进程内领取、派发、Persona×channel 与全局并发限制、轮转、失败后退避并在下次领取时重试、最早到期一次性定时唤醒、`stop()` 等待在途 Handler 后收口。running 任务不能取消，没有 Handler 硬超时 | `scheduler` 仍是 `not_implemented`。Daemon 不创建 Scheduler。装配属于 SH-008E，未开始 |
+> | 10 Scheduler | `createScheduler`（SH-008D D3，`52549e9`，D3.R1 `86eab59` 已通过独立复审）。进程内领取、派发、Persona×channel 与全局并发限制、轮转、失败后退避并在下次领取时重试、最早到期一次性定时唤醒、`stop()` 等待在途 Handler 后收口。running 任务不能取消，没有 Handler 硬超时；Handler 永不 settle 时 `stop()` 可能无限等待；同步 CPU 密集型 Handler 会阻塞事件循环；Scheduler/Recovery lease 只覆盖同一进程内的同一 `Store` 对象 | `scheduler` 仍是 `not_implemented`。Daemon 不创建 Scheduler。装配属于 SH-008E，未开始 |
 > | 11–12 API / 健康检查 | 无 | 属未开始的 SH-009 |
 
 ## 3. Daemon 关闭顺序
@@ -86,7 +86,7 @@
 
 > **D-RT1 与当前代码的对应（不另加规则）。** 领取是 persistence 的 `claimNext`：同一条 `UPDATE` 里 `attempt + 1`，写入调用方给出的新 `runId`，`started_at` 写成领取时刻。运行期间 `completeTask` / `failTask` 用当前 `run_id` 与 `attempt` 做条件写，不改 `attempt`。失败且未达上限时，`failTask` 把行退回 `queued`，`attempt` 仍是这一次领取写下的值；下一次重新领取才再加 1 并写入另一个 `runId`。崩溃恢复是 `recoverRunningTask`：未达上限则退回 `queued`，语句不改 `attempt`、不改 `run_id`；达到或超过上限则 `failed`。`recoverRuntime` 对合法的 `running` 行调用它。
 >
-> Scheduler 在包内通过 `claimNext` 领取，批次是已通过独立复审的 SH-008D D3。Daemon 不调用 `createScheduler`，也不调用 `recoverRuntime` 或 `normalizeCrashedPersonas`。因此上表是恢复规则，进程重启今天不会自动执行它。D4 未开始，SH-008D 整批未验收。
+> Scheduler 在包内通过 `claimNext` 领取，批次是已通过独立复审的 SH-008D D3；Recovery 的 D2.R1–R4 已通过最终独立代码复审；D4 已完成包内集成验证与文档收尾，等待独立复审。Daemon 不调用 `createScheduler`，也不调用 `recoverRuntime` 或 `normalizeCrashedPersonas`。因此上表是恢复规则，进程重启今天不会自动执行它。D4 复审通过前 SH-008D 整批不验收。
 
 ## 5. Persona 状态机
 

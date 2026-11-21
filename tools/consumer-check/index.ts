@@ -43,11 +43,19 @@ import {
   allocatePersonaId,
   allocateSessionId,
   createPersonaLifecycle,
+  createScheduler,
   createStimulusIngress,
+  recoverRuntime,
   type PersonaLifecycle,
   type PersonaSnapshot,
+  type RecoverRuntimeOptions,
+  type RecoveryPolicy,
+  type RecoveryReport,
   type RuntimeLogger,
+  type SchedulerOptions,
   type StimulusIngress,
+  type TaskHandler,
+  type TaskScheduler,
 } from '@soul-harness/runtime';
 
 export const personaId: PersonaId = 'psn_01JQ8Z3K5M7P9R2T4V6X8Z0ABC' as PersonaId;
@@ -166,3 +174,71 @@ export const unbounded: StimulusIngress = createStimulusIngress({
   // @ts-expect-error queue capacity and buffer TTL are required
   config: {},
 });
+
+// --- runtime: SH-008D D4 — Recovery and Scheduler through the public API -----
+
+export const sharedPolicy: RecoveryPolicy = { maxAttempts: 3, retryBackoffMs: 0 };
+
+export const consumerHandler: TaskHandler = (task, context) => {
+  // A handler sees the claimed row and run identity; it cannot write task state.
+  void task.id;
+  void task.attempt;
+  void context.runId;
+  void context.signal.aborted;
+  context.logger.info('consumer.handler', { taskId: task.id });
+};
+
+export const handlerMap: ReadonlyMap<string, TaskHandler> = new Map([
+  ['thought.run', consumerHandler],
+]);
+
+export const recoveryOptions: RecoverRuntimeOptions = {
+  store,
+  logger: consumerLogger,
+  policy: sharedPolicy,
+  now: () => 0,
+};
+
+export const pendingRecovery: Promise<RecoveryReport> = recoverRuntime(recoveryOptions);
+
+export const schedulerOptions: SchedulerOptions = {
+  store,
+  logger: consumerLogger,
+  policy: sharedPolicy,
+  handlers: handlerMap,
+  now: () => 0,
+  timers: { setTimeout: () => 0, clearTimeout: () => undefined },
+};
+
+export const scheduler: TaskScheduler = createScheduler(schedulerOptions);
+
+export const policyIsShared: boolean = recoveryOptions.policy === schedulerOptions.policy;
+
+// @ts-expect-error Recovery policy is required; there is no library default.
+export const recoveryWithoutPolicy: RecoverRuntimeOptions = {
+  store,
+  logger: consumerLogger,
+};
+
+// @ts-expect-error Scheduler policy is required (D-RT2/D-RT3: no library default).
+export const schedulerWithoutPolicy: SchedulerOptions = {
+  store,
+  logger: consumerLogger,
+  handlers: handlerMap,
+};
+
+// @ts-expect-error handlers are required; P1 fixes the map at creation.
+export const schedulerWithoutHandlers: SchedulerOptions = {
+  store,
+  logger: consumerLogger,
+  policy: sharedPolicy,
+};
+
+// @ts-expect-error the shared policy must carry both approved fields.
+export const incompletePolicy: RecoveryPolicy = { maxAttempts: 3 };
+
+export const schedulerWithRegister: TaskScheduler = {
+  ...scheduler,
+  // @ts-expect-error there is no runtime registerHandler on the public Scheduler.
+  registerHandler: () => () => undefined,
+};

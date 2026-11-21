@@ -499,7 +499,7 @@ CREATE UNIQUE INDEX ux_sessions_external
 | I02 | 所有 ID 由 Harness 生成；Adapter 提交内部 ID 一律拒绝 | 未实现 |
 | I03 | 相同 `(personaId, adapterId, source, adapterEventRef)` 重投返回同一 `eventId` | **部分（SH-008C 进程内 Ingress）**：同键再次 `acceptStimulus` 返回既有 `eventId`，不插入第二行（`packages/runtime/test/ingress.test.ts`）。`bodyVerified` 恒为 `false`。无 HTTP，Daemon 未调用。整条验收未通过 |
 | I04 | 不同 Adapter 或不同 persona 使用相同 `adapterEventRef` 不冲突 | **索引已落地，事件用例未测完**：`ux_events_dedupe` 是 `(persona_id, adapter_id, source, adapter_event_ref)`。`ingress.test.ts` 没有用同一 `adapterEventRef` 对两个 persona 或两个 adapter 断言两条事件行。不写成通过 |
-| I05 | 每次重试产生新 `runId`，`taskId` 不变，`attemptNo` 递增 | **部分（D1 原语与 D3 派发路径，整条验收未通过）**：`claimNext` 在领取时 `attempt+1` 并写入新 `runId`，`taskId` 不变。失败退回 `queued` 时不加 `attempt`，下一次领取再加。崩溃恢复不加 `attempt`、不换 `runId`。Scheduler 的 `claimOne` 调用 `claimNext`，`scheduler.test.ts` 覆盖 attempt / runId。Daemon 未装配，D4 未开始，身份协议这一整条仍未验收通过 |
+| I05 | 每次重试产生新 `runId`，`taskId` 不变，`attemptNo` 递增 | **部分（D1 原语与 D3 派发路径，整条验收未通过）**：`claimNext` 在领取时 `attempt+1` 并写入新 `runId`，`taskId` 不变。失败退回 `queued` 时不加 `attempt`，下一次领取再加。崩溃恢复不加 `attempt`、不换 `runId`。Scheduler 的 `claimOne` 调用 `claimNext`，`scheduler.test.ts` 覆盖 attempt / runId。Daemon 未装配；D4 已完成包内集成与文档收尾、等待独立复审，身份协议这一整条仍未验收通过 |
 | I06 | 同一意图的所有重试复用同一 `actionId` | 未实现 |
 | I07 | 无 `actionId` 或 `actionId` 不匹配的回执被拒绝 | 未实现 |
 | I08 | 崩溃恢复后 `executing` 动作不因重启被标记成功 | 未实现 |

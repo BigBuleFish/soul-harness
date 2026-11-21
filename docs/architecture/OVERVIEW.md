@@ -135,7 +135,7 @@ Soul Harness 是一个**独立常驻的认知运行时**：人格身份、主观
 | Monorepo 骨架 | **已实现**（SH-005） |
 | `contracts` | **已实现（协议层，SH-004）**：类型与 10 份已注册 Schema。不生成 ID，无 IO |
 | `persistence` | **SH-006A–D 已完成**：连接、WAL 模式、单写入事务、Migration、字段映射、Runtime checkpoint envelope 存取。其后 main 上还有 SH-008P 的键集分页与条件写、SH-008C 的会话复用与 P1 信封提交、SH-008D D1 的任务条件状态机。这些是后续提交，不另计为 SH-006 的再次验收。不执行显式 `PRAGMA wal_checkpoint`，不重建 Runtime，不在本包装配 Daemon |
-| `runtime` | **包内部分有代码**：SH-008A ID 分配器；SH-008B 进程内 Persona 生命周期（含 `normalizeCrashedPersonas`）；SH-008C 进程内 P1 Ingress；SH-008D D2 `recoverRuntime`（D2.R1–R4 已实施，整体尚未正式关闭）；SH-008D D3 `createScheduler`（D3.R1 已通过独立复审）。测试见 `packages/runtime/test/`。不装载/写出检查点，不做扫描 A/B。D4 未开始，SH-008D 整批未验收。Daemon 未调用本包 |
+| `runtime` | **包内部分有代码**：SH-008A ID 分配器；SH-008B 进程内 Persona 生命周期（含 `normalizeCrashedPersonas`）；SH-008C 进程内 P1 Ingress；SH-008D D2 `recoverRuntime`（D2.R1–R4 已通过最终独立代码复审）；SH-008D D3 `createScheduler`（D3.R1 已通过独立复审）。测试见 `packages/runtime/test/`。不装载/写出检查点，不做扫描 A/B。D4 已完成集成与文档收尾、等待独立复审；复审通过前 SH-008D 整批未验收。Daemon 未调用本包 |
 | `soul-daemon` | **已实现生命周期装配（SH-007A）**：配置、日志、数据目录、单实例锁、打开 SQLite、Migration、Schema 校验、启停状态机。进入 `RUNNING` 只表示进程持有数据库与锁，人格认知循环没有运行 |
 | Daemon 上的 Persona Recovery、Runtime Recovery、Event Bus、Scheduler | **装配未实现。** `phases.ts` 把这四步标为 `not_implemented`（owner 字符串仍是 `SH-008`）。接线批次是 SH-008E，未开始。包内已有人格归一、进程内 Ingress、`recoverRuntime` 和 Scheduler；Daemon 不创建 Scheduler |
 | HTTP / WebSocket / 健康检查 | **未实现**（源码 owner 记为 SH-009；该任务未开始） |

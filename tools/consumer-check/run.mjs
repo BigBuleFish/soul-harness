@@ -255,6 +255,261 @@ try {
   rmSync(runtimeDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
+// --- runtime: SH-008D D2/D3/D4 — Recovery, Scheduler, and the Store lease ----
+
+for (const internal of ['acquireStoreLease', 'hasStoreLease']) {
+  assert.equal(internal in runtime, false, `${internal} must not be exported`);
+}
+assert.equal(typeof runtime.recoverRuntime, 'function');
+assert.equal(typeof runtime.createScheduler, 'function');
+
+const POLICY = { maxAttempts: 3, retryBackoffMs: 0 };
+const noop = { debug() {}, info() {}, warn() {}, error() {} };
+const noopTimers = { setTimeout: () => 0, clearTimeout: () => {} };
+const TASK_ID = `tsk_${'0'.repeat(24)}01`;
+const EVENT_ID = `evt_${'0'.repeat(24)}02`;
+
+const openConsumerStore = (prefix) => {
+  const dir = mkdtempSync(join(tmpdir(), `sh-consumer-${prefix}-`));
+  const store = persistence.openStore({ file: join(dir, 'soul.db') });
+  persistence.migrate(store);
+  return { dir, store, repos: persistence.createRepositories(store) };
+};
+const closeConsumerStore = ({ dir, store }) => {
+  store.close();
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+};
+
+// 3.1 Recovery against a real migrated database, through the built package.
+{
+  const fixture = openConsumerStore('recovery');
+  try {
+    const report = await runtime.recoverRuntime({
+      store: fixture.store,
+      logger: noop,
+      policy: POLICY,
+      now: () => NOW,
+    });
+    assert.equal(report.incomplete, null, 'empty database recovery must be complete');
+    assert.deepEqual(report.tasks, { requeued: 0, failed: 0 });
+    assert.deepEqual(report.events, { expired: 0 });
+    assert.equal(report.personasScanned, 0);
+  } finally {
+    closeConsumerStore(fixture);
+  }
+}
+
+// 3.2 Scheduler lifecycle, through the built package.
+{
+  const fixture = openConsumerStore('scheduler');
+  try {
+    fixture.repos.personas.insert({
+      id: PERSONA,
+      displayName: 'Scheduler consumer',
+      state: 'RUNNING',
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const scheduler = runtime.createScheduler({
+      store: fixture.store,
+      logger: noop,
+      policy: POLICY,
+      handlers: { 'thought.run': () => undefined },
+      now: () => NOW,
+      timers: noopTimers,
+    });
+    assert.equal(scheduler.state, 'created');
+    scheduler.start();
+    assert.equal(scheduler.state, 'running');
+    await scheduler.stop();
+    assert.equal(scheduler.state, 'stopped');
+    assert.deepEqual(scheduler.stats(), { state: 'stopped', activeHandlers: 0, activeUnits: 0 });
+    assert.throws(
+      () => scheduler.start(),
+      (error) => runtime.isRuntimeError(error) && error.code === 'illegal_transition',
+    );
+    await scheduler.stop(); // repeated stop is idempotent
+  } finally {
+    closeConsumerStore(fixture);
+  }
+}
+
+// 3.3-A Scheduler lease blocks Recovery, and Recovery runs after stop.
+{
+  const fixture = openConsumerStore('lease-a');
+  try {
+    fixture.repos.personas.insert({
+      id: PERSONA,
+      displayName: 'Lease A',
+      state: 'RUNNING',
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    fixture.repos.tasks.insertQueuedTask({
+      id: TASK_ID,
+      personaId: PERSONA,
+      kind: 'thought.run',
+      channel: 'inner',
+    });
+    fixture.repos.events.commitP1Envelope({
+      id: EVENT_ID,
+      personaId: PERSONA,
+      source: 'minecraft.chat',
+      adapterId: 'minecraft',
+      adapterEventRef: 'lease-a-1',
+      receivedAt: NOW,
+      updatedAt: NOW,
+      outcome: { status: 'accepted' },
+    });
+    const scheduler = runtime.createScheduler({
+      store: fixture.store,
+      logger: noop,
+      policy: POLICY,
+      handlers: { 'thought.run': () => undefined },
+      now: () => NOW,
+      timers: noopTimers,
+    });
+    const tasksBefore = fixture.repos.tasks.listByPersonaState({
+      personaId: PERSONA,
+      state: 'queued',
+    }).length;
+    const eventBefore = fixture.repos.events.getById({ personaId: PERSONA, id: EVENT_ID });
+    await assert.rejects(
+      runtime.recoverRuntime({
+        store: fixture.store,
+        logger: noop,
+        policy: POLICY,
+        now: () => NOW,
+      }),
+      (error) => runtime.isRuntimeError(error) && error.code === 'illegal_transition',
+    );
+    assert.equal(
+      fixture.repos.tasks.listByPersonaState({ personaId: PERSONA, state: 'queued' }).length,
+      tasksBefore,
+      'a rejected Recovery must not change task rows',
+    );
+    assert.deepEqual(
+      fixture.repos.events.getById({ personaId: PERSONA, id: EVENT_ID }),
+      eventBefore,
+      'a rejected Recovery must not change event rows',
+    );
+    await scheduler.stop();
+    const report = await runtime.recoverRuntime({
+      store: fixture.store,
+      logger: noop,
+      policy: POLICY,
+      now: () => NOW,
+    });
+    assert.equal(report.incomplete, null, 'Recovery must run after Scheduler stop');
+  } finally {
+    closeConsumerStore(fixture);
+  }
+}
+
+// 3.3-B Recovery lease blocks Scheduler creation; the lease is released afterwards.
+//
+// `recoverRuntime` takes the lease synchronously and only releases it in its
+// `finally` after the awaited scan settles. Calling it without `await` therefore
+// opens a deterministic window that needs no sleep or test-only hook.
+{
+  const fixture = openConsumerStore('lease-b');
+  try {
+    const pendingRecovery = runtime.recoverRuntime({
+      store: fixture.store,
+      logger: noop,
+      policy: POLICY,
+      now: () => NOW,
+    });
+    assert.throws(
+      () =>
+        runtime.createScheduler({
+          store: fixture.store,
+          logger: noop,
+          policy: POLICY,
+          handlers: { 'thought.run': () => undefined },
+          now: () => NOW,
+          timers: noopTimers,
+        }),
+      (error) => runtime.isRuntimeError(error) && error.code === 'illegal_transition',
+    );
+    const report = await pendingRecovery;
+    assert.equal(report.incomplete, null);
+    const scheduler = runtime.createScheduler({
+      store: fixture.store,
+      logger: noop,
+      policy: POLICY,
+      handlers: { 'thought.run': () => undefined },
+      now: () => NOW,
+      timers: noopTimers,
+    });
+    assert.equal(scheduler.state, 'created');
+    await scheduler.stop();
+  } finally {
+    closeConsumerStore(fixture);
+  }
+}
+
+// 3.4 The lease is held until stop finishes, not released when stop begins.
+{
+  const fixture = openConsumerStore('lease-stop');
+  try {
+    fixture.repos.personas.insert({
+      id: PERSONA,
+      displayName: 'Lease stop',
+      state: 'RUNNING',
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    fixture.repos.tasks.insertQueuedTask({
+      id: TASK_ID,
+      personaId: PERSONA,
+      kind: 'thought.run',
+      channel: 'inner',
+    });
+    let releaseHandler;
+    const gate = new Promise((resolve) => {
+      releaseHandler = resolve;
+    });
+    const scheduler = runtime.createScheduler({
+      store: fixture.store,
+      logger: noop,
+      policy: POLICY,
+      handlers: { 'thought.run': () => gate },
+      now: () => NOW,
+      timers: noopTimers,
+    });
+    scheduler.start();
+    await scheduler.tick();
+    assert.equal(scheduler.stats().activeHandlers, 1);
+
+    const stopping = scheduler.stop();
+    assert.equal(scheduler.state, 'stopping');
+    await assert.rejects(
+      runtime.recoverRuntime({
+        store: fixture.store,
+        logger: noop,
+        policy: POLICY,
+        now: () => NOW,
+      }),
+      (error) => runtime.isRuntimeError(error) && error.code === 'illegal_transition',
+    );
+
+    releaseHandler();
+    await stopping;
+    assert.equal(scheduler.state, 'stopped');
+    assert.equal(scheduler.stats().activeHandlers, 0);
+    const report = await runtime.recoverRuntime({
+      store: fixture.store,
+      logger: noop,
+      policy: POLICY,
+      now: () => NOW,
+    });
+    assert.equal(report.incomplete, null, 'lease must be released only after stop completes');
+  } finally {
+    closeConsumerStore(fixture);
+  }
+}
+
 console.log(
-  `consumer-check ok: package-name imports resolved, ${SCHEMA_IDS.length} schemas, persistence E2E ok, runtime persona lifecycle and P1 ingress ok`,
+  `consumer-check ok: package-name imports resolved, ${SCHEMA_IDS.length} schemas, persistence E2E ok, runtime persona lifecycle and P1 ingress ok, recovery and scheduler E2E ok, Store lease mutual exclusion ok`,
 );
