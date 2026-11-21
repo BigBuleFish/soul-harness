@@ -13,7 +13,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { PersistenceError } from '../errors.js';
 import { DEFAULT_BUSY_TIMEOUT_MS, applyPragmas, assertPragmas } from './pragmas.js';
-import { Store } from './store.js';
+import { createStore, type Store } from './store.js';
 
 export interface OpenStoreOptions {
   /** Path of the SQLite file. Relative paths resolve against `process.cwd()`. */
@@ -57,5 +57,5 @@ export function openStore(options: OpenStoreOptions): Store {
     throw error;
   }
 
-  return new Store(file, database);
+  return createStore(file, database);
 }
