@@ -647,6 +647,7 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
       (row) => {
         const result = repos.tasks.failExhaustedTask({
           id: row.id,
+          personaId,
           expectedState: 'queued',
           expectedAttempt: row.attempt,
           maxAttempts: cfg.policy.maxAttempts,
@@ -690,6 +691,7 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
       (row) => {
         const result = repos.tasks.failExhaustedTask({
           id: row.id,
+          personaId,
           expectedState: 'paused',
           expectedAttempt: row.attempt,
           maxAttempts: cfg.policy.maxAttempts,

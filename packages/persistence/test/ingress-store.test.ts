@@ -78,7 +78,7 @@ describe('sessions.openActive', () => {
 
     expect(opened.created).toBe(false);
     expect(opened.session.id).toBe(SESSION);
-    expect(storeRepos.sessions.getById(SESSION_B)).toBeNull();
+    expect(storeRepos.sessions.getById({ personaId: PERSONA_B, id: SESSION_B })).toBeNull();
     expect(storeRepos.sessions.listByPersona(PERSONA)).toHaveLength(1);
   });
 
@@ -92,7 +92,9 @@ describe('sessions.openActive', () => {
       externalId: 'dsh:abc123',
       openedAt: NOW,
     });
-    expect(storeRepos.sessions.close({ id: SESSION, closedAt: NOW + 1 })).toBe(true);
+    expect(storeRepos.sessions.close({ id: SESSION, personaId: PERSONA, closedAt: NOW + 1 })).toBe(
+      true,
+    );
 
     const opened = storeRepos.sessions.openActive({
       id: SESSION_B,
@@ -103,7 +105,7 @@ describe('sessions.openActive', () => {
     });
 
     expect(opened).toMatchObject({ created: true, session: { id: SESSION_B, closedAt: null } });
-    expect(storeRepos.sessions.getById(SESSION)).toMatchObject({
+    expect(storeRepos.sessions.getById({ personaId: PERSONA, id: SESSION })).toMatchObject({
       closedAt: NOW + 1,
       externalId: 'dsh:abc123',
     });
@@ -172,7 +174,7 @@ describe('sessions.openActive', () => {
       ),
     ).toBe('unique_conflict');
 
-    expect(storeRepos.sessions.getById(SESSION)).toMatchObject({
+    expect(storeRepos.sessions.getById({ personaId: PERSONA, id: SESSION })).toMatchObject({
       externalId: 'dsh:taken',
       closedAt: null,
     });
@@ -255,7 +257,10 @@ describe('events.commitP1Envelope', () => {
       archiveState: 'none',
       attentionOutcome: null,
     });
-    expect(storeRepos.events.getById(EVENT)).toMatchObject({ status: 'accepted', summary: null });
+    expect(storeRepos.events.getById({ personaId: PERSONA, id: EVENT })).toMatchObject({
+      status: 'accepted',
+      summary: null,
+    });
   });
 
   it('commits queue_overflow as expired in the same transaction and keeps occurredAt', () => {
@@ -318,8 +323,8 @@ describe('events.commitP1Envelope', () => {
       ),
     ).toBe('unique_conflict');
 
-    expect(storeRepos.events.getById(EVENT_B)).toBeNull();
-    expect(storeRepos.events.getById(EVENT)).toMatchObject({
+    expect(storeRepos.events.getById({ personaId: PERSONA_B, id: EVENT_B })).toBeNull();
+    expect(storeRepos.events.getById({ personaId: PERSONA, id: EVENT })).toMatchObject({
       status: 'accepted',
       statusReason: null,
       receivedAt: NOW,
@@ -345,7 +350,7 @@ describe('events.commitP1Envelope', () => {
         }),
       ),
     ).toBe('invalid_identifier');
-    expect(storeRepos.events.getById(EVENT)).toBeNull();
+    expect(storeRepos.events.getById({ personaId: PERSONA, id: EVENT })).toBeNull();
   });
 
   it('inserts received and updates it before the write transaction returns', () => {
@@ -361,7 +366,9 @@ describe('events.commitP1Envelope', () => {
 
     expect(collapsed).toContain("VALUES (?, ?, ?, ?, ?, ?, 'received'");
     expect(collapsed).toContain('SET status = ?, status_reason = ?, updated_at = ?');
-    expect(collapsed).toContain("WHERE id = ? AND status = 'received' AND archive_state = 'none'");
+    expect(collapsed).toContain(
+      "WHERE id = ? AND persona_id = ? AND status = 'received' AND archive_state = 'none'",
+    );
     const inserted = collapsed.slice(0, collapsed.indexOf('UPDATE events'));
     expect(inserted).not.toContain('archive_');
     expect(collapsed).not.toContain('archive_ref');
@@ -416,6 +423,7 @@ describe('events.expireActive', () => {
       updatedAt: NOW,
     });
     storeRepos.events.updateStatus({
+      personaId: PERSONA,
       id: EVENT,
       status: 'rejected',
       statusReason: 'auth_failed',
@@ -450,12 +458,12 @@ describe('events.expireActive', () => {
       }),
     ).toBeNull();
 
-    expect(storeRepos.events.getById(EVENT)).toMatchObject({
+    expect(storeRepos.events.getById({ personaId: PERSONA, id: EVENT })).toMatchObject({
       status: 'rejected',
       statusReason: 'auth_failed',
       updatedAt: NOW + 1,
     });
-    expect(storeRepos.events.getById(EVENT_B)).toMatchObject({
+    expect(storeRepos.events.getById({ personaId: PERSONA_B, id: EVENT_B })).toMatchObject({
       status: 'accepted',
       statusReason: null,
       personaId: PERSONA_B,
@@ -488,7 +496,7 @@ describe('events.expireActive', () => {
         reason: 'ttl_expired',
       }),
     ).toBeNull();
-    expect(storeRepos.events.getById(EVENT)).toMatchObject({
+    expect(storeRepos.events.getById({ personaId: PERSONA, id: EVENT })).toMatchObject({
       status: 'received',
       statusReason: null,
       archiveState: 'pending',
@@ -529,7 +537,10 @@ describe('events.expireActive', () => {
         }),
       ),
     ).toBe('invalid_identifier');
-    expect(storeRepos.events.getById(EVENT)).toMatchObject({ status: 'accepted', updatedAt: NOW });
+    expect(storeRepos.events.getById({ personaId: PERSONA, id: EVENT })).toMatchObject({
+      status: 'accepted',
+      updatedAt: NOW,
+    });
   });
 });
 
@@ -580,6 +591,7 @@ describe('events.rejectIfActive', () => {
       updatedAt: NOW,
     });
     storeRepos.events.updateStatus({
+      personaId: PERSONA,
       id: EVENT,
       status: 'expired',
       statusReason: 'ttl_expired',
@@ -613,11 +625,11 @@ describe('events.rejectIfActive', () => {
         reason: 'processing_failed',
       }),
     ).toBeNull();
-    expect(storeRepos.events.getById(EVENT)).toMatchObject({
+    expect(storeRepos.events.getById({ personaId: PERSONA, id: EVENT })).toMatchObject({
       status: 'expired',
       statusReason: 'ttl_expired',
     });
-    expect(storeRepos.events.getById(EVENT_B)).toMatchObject({
+    expect(storeRepos.events.getById({ personaId: PERSONA_B, id: EVENT_B })).toMatchObject({
       status: 'accepted',
       personaId: PERSONA_B,
     });
@@ -649,7 +661,7 @@ describe('events.rejectIfActive', () => {
         reason: 'processing_failed',
       }),
     ).toBeNull();
-    expect(storeRepos.events.getById(EVENT)).toMatchObject({
+    expect(storeRepos.events.getById({ personaId: PERSONA, id: EVENT })).toMatchObject({
       status: 'accepted',
       archiveState: 'pending',
     });
@@ -679,6 +691,6 @@ describe('events.rejectIfActive', () => {
         }),
       ),
     ).toBe('invalid_argument');
-    expect(storeRepos.events.getById(EVENT)?.status).toBe('accepted');
+    expect(storeRepos.events.getById({ personaId: PERSONA, id: EVENT })?.status).toBe('accepted');
   });
 });

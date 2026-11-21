@@ -156,9 +156,13 @@ describe('whole package, real file, two process lifetimes', () => {
 
     const reposTwo = createRepositories(second);
     expect(reposTwo.personas.getById(PERSONA)?.displayName).toBe('Primary');
-    expect(reposTwo.sessions.getById(SESSION)?.externalId).toBe('mc:one');
-    expect(reposTwo.events.getById(EVENT)?.status).toBe('accepted');
-    expect(reposTwo.tasks.getById(TASK)?.payloadJson).toStrictEqual({ eventId: EVENT });
+    expect(reposTwo.sessions.getById({ personaId: PERSONA, id: SESSION })?.externalId).toBe(
+      'mc:one',
+    );
+    expect(reposTwo.events.getById({ personaId: PERSONA, id: EVENT })?.status).toBe('accepted');
+    expect(reposTwo.tasks.getById({ personaId: PERSONA, id: TASK })?.payloadJson).toStrictEqual({
+      eventId: EVENT,
+    });
     expect(reposTwo.schemaMigrations.getLatest()?.version).toBe(1);
 
     const checkpoint = reposTwo.checkpoints.load(PERSONA);
@@ -262,6 +266,7 @@ describe('transaction boundaries hold when repositories are combined', () => {
     });
     repos.personas.updateState({ id: PERSONA, state: 'SUSPENDED', updatedAt: NOW + 2 });
     repos.events.updateStatus({
+      personaId: PERSONA,
       id: EVENT,
       status: 'expired',
       statusReason: 'ttl_expired',
@@ -284,10 +289,12 @@ describe('transaction boundaries hold when repositories are combined', () => {
     // Each repository owns its own columns: nothing was clobbered.
     expect(repos.personas.getById(PERSONA)?.state).toBe('SUSPENDED');
     expect(repos.personas.getById(PERSONA)?.version).toBe(1);
-    expect(repos.events.getById(EVENT)?.status).toBe('expired');
-    expect(repos.events.getById(EVENT)?.statusReason).toBe('ttl_expired');
-    expect(repos.sessions.getById(SESSION)?.closedAt).toBeNull();
-    expect(repos.tasks.getById(TASK)?.state).toBe('queued');
+    expect(repos.events.getById({ personaId: PERSONA, id: EVENT })?.status).toBe('expired');
+    expect(repos.events.getById({ personaId: PERSONA, id: EVENT })?.statusReason).toBe(
+      'ttl_expired',
+    );
+    expect(repos.sessions.getById({ personaId: PERSONA, id: SESSION })?.closedAt).toBeNull();
+    expect(repos.tasks.getById({ personaId: PERSONA, id: TASK })?.state).toBe('queued');
     expect(repos.runtimeState.get(PERSONA)?.state).toBe('DRAINING');
     expect(repos.runtimeState.get(PERSONA)?.epoch).toBe(1);
 

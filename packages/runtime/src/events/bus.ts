@@ -623,7 +623,7 @@ export function createStimulusIngress(options: StimulusIngressOptions): Stimulus
       const id = allocateSessionId({
         now: () => openedAt,
         isOccupied: (candidate) =>
-          isSessionId(candidate) && repos.sessions.getById(candidate) !== null,
+          isSessionId(candidate) && repos.sessions.getById({ personaId, id: candidate }) !== null,
         ...(options.randomBytes === undefined ? {} : { randomBytes: options.randomBytes }),
       });
       try {
@@ -664,7 +664,9 @@ export function createStimulusIngress(options: StimulusIngressOptions): Stimulus
     for (let attempt = 1; attempt <= ID_ALLOCATION_MAX_ATTEMPTS; attempt += 1) {
       const eventId = allocateEventId({
         now: () => stimulus.receivedAt,
-        isOccupied: (candidate) => isEventId(candidate) && repos.events.getById(candidate) !== null,
+        isOccupied: (candidate) =>
+          isEventId(candidate) &&
+          repos.events.getById({ personaId: stimulus.personaId, id: candidate }) !== null,
         ...(options.randomBytes === undefined ? {} : { randomBytes: options.randomBytes }),
       });
       const waited = options.beforePersist?.({

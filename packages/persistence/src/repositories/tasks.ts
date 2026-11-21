@@ -86,8 +86,15 @@ export interface ClaimNextTaskInput {
   readonly kinds: readonly string[];
 }
 
+/** Persona-scoped task identity (IDENTITY-PROTOCOL §1.5). */
+export interface ScopedTaskId {
+  readonly personaId: PersonaId;
+  readonly id: TaskId;
+}
+
 export interface CompleteTaskInput {
   readonly id: TaskId;
+  readonly personaId: PersonaId;
   readonly runId: RunId;
   readonly expectedAttempt: number;
   readonly finishedAt: number;
@@ -95,6 +102,7 @@ export interface CompleteTaskInput {
 
 export interface FailTaskInput {
   readonly id: TaskId;
+  readonly personaId: PersonaId;
   readonly runId: RunId;
   readonly expectedAttempt: number;
   readonly maxAttempts: number;
@@ -109,6 +117,7 @@ export interface FailTaskInput {
 
 export interface FailExhaustedTaskInput {
   readonly id: TaskId;
+  readonly personaId: PersonaId;
   readonly expectedState: 'queued' | 'paused';
   readonly expectedAttempt: number;
   readonly maxAttempts: number;
@@ -137,6 +146,7 @@ export interface ListTaskPageInput {
 
 export interface SetTaskStateInput {
   readonly id: TaskId;
+  readonly personaId: PersonaId;
   readonly expectedState: 'queued' | 'paused';
   readonly nextState: 'queued' | 'paused' | 'cancelled';
   /** Timestamp written to `finished_at` when the target state is `cancelled`. */
@@ -303,9 +313,10 @@ function mapTask(raw: Readonly<Record<string, unknown>>): TaskRow {
   };
 }
 
-function selectById(source: StatementSource, id: TaskId): TaskRow | null {
+function selectById(source: StatementSource, personaId: PersonaId, id: TaskId): TaskRow | null {
   const raw = oneRow<Record<string, unknown>>(
-    source.prepare(`SELECT ${COLUMNS} FROM tasks WHERE id = ?`),
+    source.prepare(`SELECT ${COLUMNS} FROM tasks WHERE persona_id = ? AND id = ?`),
+    personaId,
     id,
   );
   return raw === undefined ? null : mapTask(raw);
@@ -349,7 +360,7 @@ export function createTaskRepository(store: Store) {
           scheduledAt,
         );
 
-        const created = selectById(tx, input.id);
+        const created = selectById(tx, input.personaId, input.id);
         // Unreachable in practice: the row was inserted in this transaction.
         if (created === null) {
           throw new Error('task insert did not produce a row');
@@ -358,8 +369,14 @@ export function createTaskRepository(store: Store) {
       });
     },
 
-    getById(id: TaskId): TaskRow | null {
-      return selectById(readDatabaseOf(store), id);
+    getById(input: ScopedTaskId): TaskRow | null {
+      if (!isPersonaId(input.personaId)) {
+        invalid('personaId', 'must be a PersonaId');
+      }
+      if (!isTaskId(input.id)) {
+        invalid('id', 'must be a TaskId');
+      }
+      return selectById(readDatabaseOf(store), input.personaId, input.id);
     },
 
     /**
@@ -425,7 +442,7 @@ export function createTaskRepository(store: Store) {
         );
 
         const claimed = rows[0]?.['id'];
-        return claimed === undefined ? null : selectById(tx, claimed as TaskId);
+        return claimed === undefined ? null : selectById(tx, input.personaId, claimed as TaskId);
       });
     },
 
@@ -433,6 +450,9 @@ export function createTaskRepository(store: Store) {
     completeTask(input: CompleteTaskInput): TaskRow | null {
       if (!isTaskId(input.id)) {
         invalid('id', 'must be a TaskId');
+      }
+      if (!isPersonaId(input.personaId)) {
+        invalid('personaId', 'must be a PersonaId');
       }
       if (!isRunId(input.runId)) {
         invalid('runId', 'must be a RunId');
@@ -445,11 +465,18 @@ export function createTaskRepository(store: Store) {
           .prepare(
             `UPDATE tasks
                 SET state = 'done', finished_at = ?
-              WHERE id = ? AND state = 'running' AND run_id = ? AND attempt = ?`,
+              WHERE id = ? AND persona_id = ?
+                AND state = 'running' AND run_id = ? AND attempt = ?`,
           )
-          .run(input.finishedAt, input.id, input.runId, input.expectedAttempt).changes;
+          .run(
+            input.finishedAt,
+            input.id,
+            input.personaId,
+            input.runId,
+            input.expectedAttempt,
+          ).changes;
 
-        return Number(changes) === 0 ? null : selectById(tx, input.id);
+        return Number(changes) === 0 ? null : selectById(tx, input.personaId, input.id);
       });
     },
 
@@ -463,6 +490,9 @@ export function createTaskRepository(store: Store) {
     failTask(input: FailTaskInput): TaskRow | null {
       if (!isTaskId(input.id)) {
         invalid('id', 'must be a TaskId');
+      }
+      if (!isPersonaId(input.personaId)) {
+        invalid('personaId', 'must be a PersonaId');
       }
       if (!isRunId(input.runId)) {
         invalid('runId', 'must be a RunId');
@@ -490,7 +520,8 @@ export function createTaskRepository(store: Store) {
                 SET state        = CASE WHEN ? = 1 AND attempt < ? THEN 'queued' ELSE 'failed' END,
                     finished_at  = CASE WHEN ? = 1 AND attempt < ? THEN NULL ELSE ? END,
                     scheduled_at = CASE WHEN ? = 1 AND attempt < ? THEN ? ELSE scheduled_at END
-              WHERE id = ? AND state = 'running' AND run_id = ? AND attempt = ?`,
+              WHERE id = ? AND persona_id = ?
+                AND state = 'running' AND run_id = ? AND attempt = ?`,
           )
           .run(
             retry,
@@ -502,11 +533,12 @@ export function createTaskRepository(store: Store) {
             input.maxAttempts,
             nextScheduledAt,
             input.id,
+            input.personaId,
             input.runId,
             input.expectedAttempt,
           ).changes;
 
-        return Number(changes) === 0 ? null : selectById(tx, input.id);
+        return Number(changes) === 0 ? null : selectById(tx, input.personaId, input.id);
       });
     },
 
@@ -517,6 +549,9 @@ export function createTaskRepository(store: Store) {
     failExhaustedTask(input: FailExhaustedTaskInput): TaskRow | null {
       if (!isTaskId(input.id)) {
         invalid('id', 'must be a TaskId');
+      }
+      if (!isPersonaId(input.personaId)) {
+        invalid('personaId', 'must be a PersonaId');
       }
       if (input.expectedState !== 'queued' && input.expectedState !== 'paused') {
         invalid('expectedState', "must be 'queued' or 'paused'");
@@ -530,19 +565,20 @@ export function createTaskRepository(store: Store) {
           .prepare(
             `UPDATE tasks
                 SET state = 'failed', finished_at = ?
-              WHERE id = ? AND state = ?
+              WHERE id = ? AND persona_id = ? AND state = ?
                 AND attempt = ?
                 AND typeof(attempt) = 'integer' AND attempt >= ?`,
           )
           .run(
             input.finishedAt,
             input.id,
+            input.personaId,
             input.expectedState,
             input.expectedAttempt,
             input.maxAttempts,
           ).changes;
 
-        return Number(changes) === 0 ? null : selectById(tx, input.id);
+        return Number(changes) === 0 ? null : selectById(tx, input.personaId, input.id);
       });
     },
 
@@ -590,7 +626,7 @@ export function createTaskRepository(store: Store) {
             MAX_SAFE,
           ).changes;
 
-        return Number(changes) === 0 ? null : selectById(tx, input.id);
+        return Number(changes) === 0 ? null : selectById(tx, input.personaId, input.id);
       });
     },
 
@@ -602,6 +638,9 @@ export function createTaskRepository(store: Store) {
     setTaskState(input: SetTaskStateInput): TaskRow | null {
       if (!isTaskId(input.id)) {
         invalid('id', 'must be a TaskId');
+      }
+      if (!isPersonaId(input.personaId)) {
+        invalid('personaId', 'must be a PersonaId');
       }
       const pair = `${input.expectedState}->${input.nextState}`;
       const allowed =
@@ -627,26 +666,26 @@ export function createTaskRepository(store: Store) {
             ? tx
                 .prepare(
                   `UPDATE tasks SET state = 'paused', finished_at = NULL
-                    WHERE id = ? AND state = 'queued'`,
+                    WHERE id = ? AND persona_id = ? AND state = 'queued'`,
                 )
-                .run(input.id).changes
+                .run(input.id, input.personaId).changes
             : pair === 'paused->queued'
               ? tx
                   .prepare(
                     `UPDATE tasks SET state = 'queued', finished_at = NULL
-                      WHERE id = ? AND state = 'paused'
+                      WHERE id = ? AND persona_id = ? AND state = 'paused'
                         AND typeof(attempt) = 'integer'
                         AND attempt >= 0 AND attempt <= ? AND attempt < ?`,
                   )
-                  .run(input.id, MAX_SAFE, attemptCap).changes
+                  .run(input.id, input.personaId, MAX_SAFE, attemptCap).changes
               : tx
                   .prepare(
                     `UPDATE tasks SET state = 'cancelled', finished_at = ?
-                      WHERE id = ? AND state = ?`,
+                      WHERE id = ? AND persona_id = ? AND state = ?`,
                   )
-                  .run(input.at, input.id, input.expectedState).changes;
+                  .run(input.at, input.id, input.personaId, input.expectedState).changes;
 
-        return Number(changes) === 0 ? null : selectById(tx, input.id);
+        return Number(changes) === 0 ? null : selectById(tx, input.personaId, input.id);
       });
     },
 

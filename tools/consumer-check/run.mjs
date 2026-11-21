@@ -242,7 +242,9 @@ try {
   assert.equal(bus.metrics()[runtime.DEDUPE_BODY_UNVERIFIABLE_METRIC], 1);
   const buffered = bus.readBuffered(created.id, accepted.eventId);
   assert.equal(buffered.payload.text, canary);
-  const stored = persistence.createRepositories(runtimeStore).events.getById(accepted.eventId);
+  const stored = persistence
+    .createRepositories(runtimeStore)
+    .events.getById({ personaId: created.id, id: accepted.eventId });
   assert.equal(stored.status, 'accepted');
   assert.equal(stored.archiveState, 'none');
   assert.equal(stored.summary, null);

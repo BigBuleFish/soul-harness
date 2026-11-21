@@ -38,6 +38,7 @@ export type {
   InsertSessionInput,
   OpenActiveSessionInput,
   OpenActiveSessionResult,
+  ScopedSessionId,
   SessionRepository,
 } from './sessions.js';
 
@@ -49,6 +50,7 @@ export type {
   InsertEventInput,
   RejectActiveEventInput,
   P1CommitOutcome,
+  ScopedEventId,
   UpdateEventStatusInput,
 } from './events.js';
 
@@ -62,6 +64,7 @@ export type {
   ListTaskPageInput,
   NextDueTaskQuery,
   RecoverRunningTaskInput,
+  ScopedTaskId,
   SetTaskStateInput,
   TaskAttemptFilter,
   TaskPayloadRefs,

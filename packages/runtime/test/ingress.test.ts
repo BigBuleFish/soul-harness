@@ -302,7 +302,10 @@ describe('ingress — schema and clock', () => {
       sessionId: null,
     });
     expect(isEventId(result.eventId)).toBe(true);
-    const row = createRepositories(fixture.store).events.getById(eventOf(result));
+    const row = createRepositories(fixture.store).events.getById({
+      personaId: id,
+      id: eventOf(result),
+    });
     expect(row).toMatchObject({
       status: 'accepted',
       statusReason: null,
@@ -332,7 +335,9 @@ describe('ingress — schema and clock', () => {
     );
 
     expect(result).toMatchObject({ outcome: 'accepted', receivedAt: 9_000_000, occurredAt: 10 });
-    expect(createRepositories(fixture.store).events.getById(eventOf(result))).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: eventOf(result) }),
+    ).toMatchObject({
       occurredAt: 10,
       receivedAt: 9_000_000,
     });
@@ -445,6 +450,7 @@ describe('ingress — dedupe without a body comparison', () => {
       updatedAt: 1,
     });
     repos.events.updateStatus({
+      personaId: id,
       id: expiredId,
       status: 'expired',
       statusReason: 'ttl_expired',
@@ -462,6 +468,7 @@ describe('ingress — dedupe without a body comparison', () => {
       updatedAt: 1,
     });
     repos.events.updateStatus({
+      personaId: id,
       id: rejectedId,
       status: 'rejected',
       statusReason: 'auth_failed',
@@ -485,8 +492,8 @@ describe('ingress — dedupe without a body comparison', () => {
       status: 'rejected',
       bodyVerified: false,
     });
-    expect(repos.events.getById(expiredId)?.status).toBe('expired');
-    expect(repos.events.getById(rejectedId)?.status).toBe('rejected');
+    expect(repos.events.getById({ personaId: id, id: expiredId })?.status).toBe('expired');
+    expect(repos.events.getById({ personaId: id, id: rejectedId })?.status).toBe('rejected');
     expect(bus.metrics()[DEDUPE_BODY_UNVERIFIABLE_METRIC]).toBe(2);
     expect(bus.readBuffered(id, expiredId)).toBeNull();
   });
@@ -531,7 +538,9 @@ describe('ingress — dedupe without a body comparison', () => {
         status: 'accepted',
         bodyVerified: false,
       });
-      expect(createRepositories(fixture.store).events.getById(winner)?.status).toBe('accepted');
+      expect(
+        createRepositories(fixture.store).events.getById({ personaId: id, id: winner })?.status,
+      ).toBe('accepted');
       expect(
         createRepositories(fixture.store).events.listByPersonaStatus({
           personaId: id,
@@ -572,6 +581,7 @@ describe('ingress — sessions', () => {
     const repos = createRepositories(fixture.store);
     expect(
       repos.sessions.close({
+        personaId: id,
         id: first.sessionId as NonNullable<typeof first.sessionId>,
         closedAt: 50,
       }),
@@ -586,12 +596,18 @@ describe('ingress — sessions', () => {
     }
     expect(third.sessionId).not.toBe(first.sessionId);
     expect(
-      repos.sessions.getById(first.sessionId as NonNullable<typeof first.sessionId>),
+      repos.sessions.getById({
+        personaId: id,
+        id: first.sessionId as NonNullable<typeof first.sessionId>,
+      }),
     ).toMatchObject({
       closedAt: 50,
     });
     expect(
-      repos.sessions.getById(third.sessionId as NonNullable<typeof third.sessionId>),
+      repos.sessions.getById({
+        personaId: id,
+        id: third.sessionId as NonNullable<typeof third.sessionId>,
+      }),
     ).toMatchObject({
       closedAt: null,
       externalId: 'dsh:abc123',
@@ -674,7 +690,9 @@ describe('ingress — buffer, capacity, and ttl', () => {
     const expired = await bus.evictExpired();
     expect(expired).toEqual([{ eventId: accepted.eventId, personaId: id, reason: 'ttl_expired' }]);
     expect(bus.readBuffered(id, accepted.eventId)).toBeNull();
-    expect(createRepositories(fixture.store).events.getById(accepted.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: accepted.eventId }),
+    ).toMatchObject({
       status: 'expired',
       statusReason: 'ttl_expired',
       archiveState: 'none',
@@ -700,6 +718,7 @@ describe('ingress — buffer, capacity, and ttl', () => {
       throw new Error('expected accepted');
     }
     createRepositories(fixture.store).events.updateStatus({
+      personaId: id,
       id: accepted.eventId,
       status: 'rejected',
       statusReason: 'processing_failed',
@@ -710,7 +729,9 @@ describe('ingress — buffer, capacity, and ttl', () => {
     fixture.time = 2_200;
     expect(await bus.evictExpired()).toEqual([]);
     expect(bus.readBuffered(id, accepted.eventId)).toBeNull();
-    expect(createRepositories(fixture.store).events.getById(accepted.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: accepted.eventId }),
+    ).toMatchObject({
       status: 'rejected',
       statusReason: 'processing_failed',
       updatedAt: 2_010,
@@ -740,7 +761,9 @@ describe('ingress — buffer, capacity, and ttl', () => {
     if (overflow.outcome !== 'refused' || first.outcome !== 'accepted') {
       throw new Error('unexpected outcome');
     }
-    expect(createRepositories(fixture.store).events.getById(overflow.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: overflow.eventId }),
+    ).toMatchObject({
       status: 'expired',
       statusReason: 'queue_overflow',
       archiveState: 'none',
@@ -757,9 +780,10 @@ describe('ingress — buffer, capacity, and ttl', () => {
       status: 'expired',
       bodyVerified: false,
     });
-    expect(createRepositories(fixture.store).events.getById(overflow.eventId)?.status).toBe(
-      'expired',
-    );
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: overflow.eventId })
+        ?.status,
+    ).toBe('expired');
   });
 
   it('isolates queues and buffers by persona and by source', async () => {
@@ -847,18 +871,20 @@ describe('ingress — buffer, capacity, and ttl', () => {
     fixture.time = 50;
     fixture.scheduler.timers[0]?.fire();
     await waitFor(() => bus.readBuffered(id, eventOf(accepted)) === null);
-    expect(createRepositories(fixture.store).events.getById(eventOf(accepted))?.statusReason).toBe(
-      'ttl_expired',
-    );
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: eventOf(accepted) })
+        ?.statusReason,
+    ).toBe('ttl_expired');
 
     const again = await bus.acceptStimulus(envelope(id, 'mc-timer-2'));
     expect(fixture.scheduler.active()).toBe(1);
     bus.close();
     expect(fixture.scheduler.active()).toBe(0);
     fixture.scheduler.timers.at(-1)?.fire();
-    expect(createRepositories(fixture.store).events.getById(eventOf(again))?.status).toBe(
-      'accepted',
-    );
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: eventOf(again) })
+        ?.status,
+    ).toBe('accepted');
     await expect(bus.acceptStimulus(envelope(id, 'mc-after-close'))).rejects.toMatchObject({
       code: 'closed',
     });
@@ -972,9 +998,10 @@ describe('ingress — isolation and robustness', () => {
     const created = await bus.acceptStimulus(envelope(id, 'mc-fresh'));
     expect(created.outcome).toBe('accepted');
     expect(created.eventId).not.toBe(taken);
-    expect(createRepositories(fixture.store).events.getById(taken)?.adapterEventRef).toBe(
-      'mc-taken',
-    );
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: taken })
+        ?.adapterEventRef,
+    ).toBe('mc-taken');
   });
 
   it('does not let a throwing logger hide a commit, a dedupe hit, or a schema error', async () => {
@@ -984,9 +1011,10 @@ describe('ingress — isolation and robustness', () => {
     const loud = ingress(fixture, { logger: throwingLogger('info') });
     const accepted = await loud.acceptStimulus(envelope(id, 'mc-log'));
     expect(accepted.outcome).toBe('accepted');
-    expect(createRepositories(fixture.store).events.getById(eventOf(accepted))?.status).toBe(
-      'accepted',
-    );
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: eventOf(accepted) })
+        ?.status,
+    ).toBe('accepted');
 
     const again = await loud.acceptStimulus(envelope(id, 'mc-log'));
     expect(again).toMatchObject({
@@ -1158,14 +1186,18 @@ describe('ingress — admission bounds and snapshot', () => {
     expect(bus.readBuffered(id, accepted.eventId)).toBeNull();
     expect(JSON.stringify(fixture.logs)).toContain('ingress.ttl_persist_failed');
     expect(dump(fixture.store)).not.toContain(CANARY);
-    expect(createRepositories(fixture.store).events.getById(accepted.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: accepted.eventId }),
+    ).toMatchObject({
       status: 'accepted',
       statusReason: null,
     });
 
     const repaired = await bus.evictExpired();
     expect(repaired).toEqual([{ eventId: accepted.eventId, personaId: id, reason: 'ttl_expired' }]);
-    expect(createRepositories(fixture.store).events.getById(accepted.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: accepted.eventId }),
+    ).toMatchObject({
       status: 'expired',
       statusReason: 'ttl_expired',
     });
@@ -1201,7 +1233,9 @@ describe('ingress — admission bounds and snapshot', () => {
     expect(bus.listQueued(id)).toEqual([]);
     expect(JSON.stringify(fixture.logs)).toContain('ingress.buffer_failed');
     expect(dump(fixture.store)).not.toContain(CANARY);
-    expect(createRepositories(fixture.store).events.getById(accepted.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: accepted.eventId }),
+    ).toMatchObject({
       status: 'rejected',
       statusReason: 'processing_failed',
     });
@@ -1246,7 +1280,9 @@ describe('ingress — admission bounds and snapshot', () => {
     if (result.outcome !== 'accepted') {
       throw new Error('expected accepted');
     }
-    expect(createRepositories(fixture.store).events.getById(result.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: result.eventId }),
+    ).toMatchObject({
       personaId: id,
       adapterEventRef: 'mc-snap',
     });
@@ -1287,7 +1323,9 @@ describe('ingress — admission bounds and snapshot', () => {
     if (result.outcome !== 'accepted') {
       throw new Error('expected accepted');
     }
-    expect(createRepositories(fixture.store).events.getById(result.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: result.eventId }),
+    ).toMatchObject({
       receivedAt: 1_000,
       status: 'accepted',
     });
@@ -1322,7 +1360,9 @@ describe('ingress — review bounds', () => {
     if (result.outcome !== 'expired') {
       throw new Error('expected expired');
     }
-    expect(createRepositories(fixture.store).events.getById(result.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: result.eventId }),
+    ).toMatchObject({
       status: 'expired',
       statusReason: 'ttl_expired',
       receivedAt: 1_000,
@@ -1413,9 +1453,10 @@ describe('ingress — review bounds', () => {
       }
       fixture.time = 3_040;
       expect(await bus.evictExpired()).toEqual([]);
-      expect(createRepositories(fixture.store).events.getById(accepted.eventId)?.status).toBe(
-        'accepted',
-      );
+      expect(
+        createRepositories(fixture.store).events.getById({ personaId: id, id: accepted.eventId })
+          ?.status,
+      ).toBe('accepted');
 
       const retry = fixture.scheduler.timers.find((timer) => timer.delay === 0 && !timer.fired);
       expect(retry).toBeDefined();
@@ -1424,16 +1465,19 @@ describe('ingress — review bounds', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(rejections).toEqual([]);
-      expect(createRepositories(fixture.store).events.getById(accepted.eventId)?.status).toBe(
-        'accepted',
-      );
+      expect(
+        createRepositories(fixture.store).events.getById({ personaId: id, id: accepted.eventId })
+          ?.status,
+      ).toBe('accepted');
 
       clockDown = false;
       const repaired = await bus.evictExpired();
       expect(repaired).toEqual([
         { eventId: accepted.eventId, personaId: id, reason: 'ttl_expired' },
       ]);
-      expect(createRepositories(fixture.store).events.getById(accepted.eventId)).toMatchObject({
+      expect(
+        createRepositories(fixture.store).events.getById({ personaId: id, id: accepted.eventId }),
+      ).toMatchObject({
         status: 'expired',
         statusReason: 'ttl_expired',
       });
@@ -1476,7 +1520,9 @@ describe('ingress — post-commit isolation', () => {
     }
     expect(bus.readBuffered(id, result.eventId)).toBeNull();
     expect(dump(fixture.store)).not.toContain(CANARY);
-    expect(createRepositories(fixture.store).events.getById(result.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: result.eventId }),
+    ).toMatchObject({
       status: 'accepted',
       statusReason: null,
     });
@@ -1484,7 +1530,9 @@ describe('ingress — post-commit isolation', () => {
 
     const repaired = await bus.evictExpired();
     expect(repaired).toEqual([]);
-    expect(createRepositories(fixture.store).events.getById(result.eventId)).toMatchObject({
+    expect(
+      createRepositories(fixture.store).events.getById({ personaId: id, id: result.eventId }),
+    ).toMatchObject({
       status: 'rejected',
       statusReason: 'processing_failed',
     });
@@ -1529,12 +1577,15 @@ describe('ingress — post-commit isolation', () => {
       expect(() => timers[0]?.fire()).not.toThrow();
       await waitFor(
         () =>
-          createRepositories(fixture.store).events.getById(accepted.eventId)?.status === 'rejected',
+          createRepositories(fixture.store).events.getById({ personaId: id, id: accepted.eventId })
+            ?.status === 'rejected',
       );
       expect(rejections).toEqual([]);
       expect(bus.readBuffered(id, accepted.eventId)).toBeNull();
       expect(dump(fixture.store)).not.toContain(CANARY);
-      expect(createRepositories(fixture.store).events.getById(accepted.eventId)).toMatchObject({
+      expect(
+        createRepositories(fixture.store).events.getById({ personaId: id, id: accepted.eventId }),
+      ).toMatchObject({
         status: 'rejected',
         statusReason: 'processing_failed',
       });

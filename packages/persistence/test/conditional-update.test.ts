@@ -151,7 +151,7 @@ describe('events.expireIfActive', () => {
       attentionOutcome: 'queued',
       updatedAt: NOW + 10,
     });
-    const stored = repos.events.getById(EVENT_1);
+    const stored = repos.events.getById({ personaId: PERSONA, id: EVENT_1 });
     expect(stored?.status).toBe('expired');
     expect(stored?.statusReason).toBe('buffer_lost');
     expect(stored?.attentionOutcome).toBe('queued');
@@ -171,7 +171,7 @@ describe('events.expireIfActive', () => {
     });
 
     expect(result?.status).toBe('expired');
-    const stored = repos.events.getById(EVENT_2);
+    const stored = repos.events.getById({ personaId: PERSONA, id: EVENT_2 });
     expect(stored).toMatchObject({
       status: 'expired',
       statusReason: 'buffer_lost',
@@ -188,6 +188,7 @@ describe('events.expireIfActive', () => {
 
     insertEvent(repos, EVENT_2, 'ref-rejected', 'received', null);
     const rejected = repos.events.updateStatus({
+      personaId: PERSONA,
       id: EVENT_2,
       status: 'rejected',
       statusReason: 'auth_failed',
@@ -197,6 +198,7 @@ describe('events.expireIfActive', () => {
 
     insertEvent(repos, EVENT_3, 'ref-expired', 'received', null);
     const expired = repos.events.updateStatus({
+      personaId: PERSONA,
       id: EVENT_3,
       status: 'expired',
       statusReason: 'buffer_lost',
@@ -216,7 +218,7 @@ describe('events.expireIfActive', () => {
         }),
       ).toBeNull();
 
-      const after = repos.events.getById(before.id);
+      const after = repos.events.getById({ personaId: PERSONA, id: before.id });
       expect(after?.status).toBe(before.status);
       expect(after?.statusReason).toBe(before.statusReason);
       expect(after?.attentionOutcome).toBe(before.attentionOutcome);
@@ -244,7 +246,7 @@ describe('events.expireIfActive', () => {
       repos.events.expireIfActive({ id: EVENT_1, personaId: PERSONA, updatedAt: NOW + 40 }),
     ).toBeNull();
 
-    expect(repos.events.getById(EVENT_1)).toMatchObject({
+    expect(repos.events.getById({ personaId: PERSONA_B, id: EVENT_1 })).toMatchObject({
       id: ownedByB.id,
       personaId: PERSONA_B,
       status: 'received',
@@ -288,7 +290,7 @@ describe('events.expireIfActive', () => {
         repos.events.expireIfActive({ id: EVENT_1, personaId: PERSONA, updatedAt: NOW + 80 }),
       ).toBeNull();
 
-      expect(repos.events.getById(EVENT_1)).toMatchObject({
+      expect(repos.events.getById({ personaId: PERSONA, id: EVENT_1 })).toMatchObject({
         status: before.status,
         statusReason: before.statusReason,
         attentionOutcome: 'queued',
@@ -316,7 +318,7 @@ describe('events.expireIfActive', () => {
       ).toBe('invalid_identifier');
     }
 
-    expect(repos.events.getById(EVENT_1)).toMatchObject({
+    expect(repos.events.getById({ personaId: PERSONA, id: EVENT_1 })).toMatchObject({
       status: 'received',
       statusReason: null,
       attentionOutcome: 'queued',

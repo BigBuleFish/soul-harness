@@ -151,8 +151,10 @@ describe('sessions repository', () => {
       });
 
     expect(find()?.id).toBe(SESSION);
-    expect(repos.sessions.close({ id: SESSION, closedAt: NOW + 1 })).toBe(true);
-    expect(repos.sessions.close({ id: SESSION, closedAt: NOW + 2 })).toBe(false);
+    expect(repos.sessions.close({ id: SESSION, personaId: PERSONA, closedAt: NOW + 1 })).toBe(true);
+    expect(repos.sessions.close({ id: SESSION, personaId: PERSONA, closedAt: NOW + 2 })).toBe(
+      false,
+    );
     expect(find()).toBeNull();
   });
 
@@ -166,7 +168,7 @@ describe('sessions repository', () => {
       externalId: 'qq:group-1',
       openedAt: NOW,
     });
-    repos.sessions.close({ id: SESSION, closedAt: NOW + 1 });
+    repos.sessions.close({ id: SESSION, personaId: PERSONA, closedAt: NOW + 1 });
 
     const reopened = repos.sessions.insert({
       id: 'ses_01JQ8Z4A6N8Q0S3V5W7Y9B1CDF' as SessionId,
@@ -258,6 +260,7 @@ describe('events repository', () => {
     });
 
     const updated = repos.events.updateStatus({
+      personaId: PERSONA,
       id: EVENT,
       status: 'expired',
       statusReason: 'ttl_expired',
@@ -362,6 +365,7 @@ describe('tasks repository', () => {
     expect(running?.runId).toBe(RUN);
 
     const done = repos.tasks.completeTask({
+      personaId: PERSONA,
       id: TASK,
       runId: RUN,
       expectedAttempt: 1,
@@ -371,6 +375,7 @@ describe('tasks repository', () => {
     expect(repos.tasks.listByPersonaState({ personaId: PERSONA, state: 'done' })).toHaveLength(1);
     expect(
       repos.tasks.completeTask({
+        personaId: PERSONA,
         id: 'tsk_01JQ8Z6B7P9R1T3V5X7Z9A2BDG' as TaskId,
         runId: RUN,
         expectedAttempt: 1,

@@ -44,8 +44,15 @@ export interface InsertSessionInput {
   readonly metaJson?: JsonObject | null;
 }
 
+/** Persona-scoped session identity (IDENTITY-PROTOCOL §1.5). */
+export interface ScopedSessionId {
+  readonly personaId: PersonaId;
+  readonly id: SessionId;
+}
+
 export interface CloseSessionInput {
   readonly id: SessionId;
+  readonly personaId: PersonaId;
   readonly closedAt: number;
 }
 
@@ -129,9 +136,14 @@ function mapSession(raw: Readonly<Record<string, unknown>>): SessionRow {
   };
 }
 
-function selectById(source: StatementSource, id: SessionId): SessionRow | null {
+function selectById(
+  source: StatementSource,
+  personaId: PersonaId,
+  id: SessionId,
+): SessionRow | null {
   const raw = oneRow<Record<string, unknown>>(
-    source.prepare(`SELECT ${COLUMNS} FROM sessions WHERE id = ?`),
+    source.prepare(`SELECT ${COLUMNS} FROM sessions WHERE persona_id = ? AND id = ?`),
+    personaId,
     id,
   );
   return raw === undefined ? null : mapSession(raw);
@@ -174,7 +186,7 @@ export function createSessionRepository(store: Store) {
           encodeOptionalJson(JSON_SCHEMA_IDS.sessionMeta, input.metaJson),
         );
 
-        const created = selectById(tx, input.id);
+        const created = selectById(tx, input.personaId, input.id);
         // Unreachable in practice: the row was inserted in this transaction.
         if (created === null) {
           throw new Error('session insert did not produce a row');
@@ -183,8 +195,18 @@ export function createSessionRepository(store: Store) {
       });
     },
 
-    getById(id: SessionId): SessionRow | null {
-      return selectById(readDatabaseOf(store), id);
+    getById(input: ScopedSessionId): SessionRow | null {
+      if (!isPersonaId(input.personaId)) {
+        throw new PersistenceError('invalid_identifier', 'personaId must be a valid PersonaId', {
+          details: { field: 'personaId' },
+        });
+      }
+      if (!isSessionId(input.id)) {
+        throw new PersistenceError('invalid_identifier', 'session id must be a valid SessionId', {
+          details: { field: 'id' },
+        });
+      }
+      return selectById(readDatabaseOf(store), input.personaId, input.id);
     },
 
     /** Looks up the still-open mapping for an adapter-side reference. */
@@ -228,7 +250,7 @@ export function createSessionRepository(store: Store) {
           throw error;
         }
 
-        const created = selectById(tx, input.id);
+        const created = selectById(tx, input.personaId, input.id);
         if (created === null) {
           throw new Error('session insert did not produce a row');
         }
@@ -236,12 +258,29 @@ export function createSessionRepository(store: Store) {
       });
     },
 
-    /** Closes an open session. Returns false when it was already closed. */
+    /**
+     * Closes an open session **of the given persona**.
+     *
+     * Returns false when it was already closed or belongs to another persona;
+     * the persona scope is part of the UPDATE itself, not a caller-side check.
+     */
     close(input: CloseSessionInput): boolean {
+      if (!isPersonaId(input.personaId)) {
+        throw new PersistenceError('invalid_identifier', 'personaId must be a valid PersonaId', {
+          details: { field: 'personaId' },
+        });
+      }
+      if (!isSessionId(input.id)) {
+        throw new PersistenceError('invalid_identifier', 'session id must be a valid SessionId', {
+          details: { field: 'id' },
+        });
+      }
       return withWrite(store, (tx) => {
         const changes = tx
-          .prepare('UPDATE sessions SET closed_at = ? WHERE id = ? AND closed_at IS NULL')
-          .run(input.closedAt, input.id).changes;
+          .prepare(
+            'UPDATE sessions SET closed_at = ? WHERE id = ? AND persona_id = ? AND closed_at IS NULL',
+          )
+          .run(input.closedAt, input.id, input.personaId).changes;
         return Number(changes) > 0;
       });
     },

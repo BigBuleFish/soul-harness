@@ -156,12 +156,12 @@ function claimRunning(store: Store, n = 1, persona = 1): void {
   });
 }
 
-function taskState(store: Store, n = 1) {
-  return repos(store).tasks.getById(tid(n));
+function taskState(store: Store, n = 1, persona = 1) {
+  return repos(store).tasks.getById({ personaId: pid(persona), id: tid(n) });
 }
 
-function eventState(store: Store, n = 1) {
-  return repos(store).events.getById(eid(n));
+function eventState(store: Store, n = 1, persona = 1) {
+  return repos(store).events.getById({ personaId: pid(persona), id: eid(n) });
 }
 
 async function recover(
@@ -463,7 +463,7 @@ describe('recoverRuntime — scan and budget behavior', () => {
     // Persona 1's conditional migration stays committed (no fake rollback);
     // persona 2 must not be scanned or written after the cancel boundary.
     expect(taskState(store, 1)).toMatchObject({ state: 'queued', attempt: 1, runId: rid(1) });
-    expect(taskState(store, 2)).toMatchObject({ state: 'running', attempt: 1, runId: rid(2) });
+    expect(taskState(store, 2, 2)).toMatchObject({ state: 'running', attempt: 1, runId: rid(2) });
   });
 
   it('aborts during the global probe after at least one real probe ran', async () => {

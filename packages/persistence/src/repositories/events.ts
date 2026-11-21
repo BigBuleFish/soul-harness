@@ -117,8 +117,15 @@ function assertInsertInput(input: InsertEventInput): void {
   }
 }
 
+/** Persona-scoped event identity (IDENTITY-PROTOCOL §1.5). */
+export interface ScopedEventId {
+  readonly personaId: PersonaId;
+  readonly id: EventId;
+}
+
 export interface UpdateEventStatusInput {
   readonly id: EventId;
+  readonly personaId: PersonaId;
   readonly status: EventStatus;
   /** Must be non-null exactly for the terminal statuses (DATA-MODEL §3.4). */
   readonly statusReason: StatusReason | null;
@@ -330,9 +337,10 @@ function mapEvent(raw: Readonly<Record<string, unknown>>): EventRow {
   };
 }
 
-function selectById(source: StatementSource, id: EventId): EventRow | null {
+function selectById(source: StatementSource, personaId: PersonaId, id: EventId): EventRow | null {
   const raw = oneRow<Record<string, unknown>>(
-    source.prepare(`SELECT ${COLUMNS} FROM events WHERE id = ?`),
+    source.prepare(`SELECT ${COLUMNS} FROM events WHERE persona_id = ? AND id = ?`),
+    personaId,
     id,
   );
   return raw === undefined ? null : mapEvent(raw);
@@ -366,7 +374,7 @@ export function createEventRepository(store: Store) {
           input.updatedAt,
         );
 
-        const created = selectById(tx, input.id);
+        const created = selectById(tx, input.personaId, input.id);
         // Unreachable in practice: the row was inserted in this transaction.
         if (created === null) {
           throw new Error('event insert did not produce a row');
@@ -375,8 +383,18 @@ export function createEventRepository(store: Store) {
       });
     },
 
-    getById(id: EventId): EventRow | null {
-      return selectById(readDatabaseOf(store), id);
+    getById(input: ScopedEventId): EventRow | null {
+      if (!isPersonaId(input.personaId)) {
+        throw new PersistenceError('invalid_argument', 'personaId must be a PersonaId', {
+          details: { field: 'personaId' },
+        });
+      }
+      if (!isEventId(input.id)) {
+        throw new PersistenceError('invalid_argument', 'id must be an EventId', {
+          details: { field: 'id' },
+        });
+      }
+      return selectById(readDatabaseOf(store), input.personaId, input.id);
     },
 
     /** Uses `ux_events_dedupe`; returns the existing event for the same stimulus. */
@@ -400,14 +418,24 @@ export function createEventRepository(store: Store) {
       return raw === undefined ? null : mapEvent(raw);
     },
 
-    /** Returns the updated row, or null when no event has that id. */
+    /** Returns the updated row, or null when no event has that (persona, id). */
     updateStatus(input: UpdateEventStatusInput): EventRow | null {
+      if (!isPersonaId(input.personaId)) {
+        throw new PersistenceError('invalid_argument', 'personaId must be a PersonaId', {
+          details: { field: 'personaId' },
+        });
+      }
+      if (!isEventId(input.id)) {
+        throw new PersistenceError('invalid_argument', 'id must be an EventId', {
+          details: { field: 'id' },
+        });
+      }
       return withWrite(store, (tx) => {
         const changes = tx
           .prepare(
             `UPDATE events
              SET status = ?, status_reason = ?, attention_outcome = ?, updated_at = ?
-             WHERE id = ?`,
+             WHERE id = ? AND persona_id = ?`,
           )
           .run(
             input.status,
@@ -415,9 +443,10 @@ export function createEventRepository(store: Store) {
             input.attentionOutcome,
             input.updatedAt,
             input.id,
+            input.personaId,
           ).changes;
 
-        return Number(changes) === 0 ? null : selectById(tx, input.id);
+        return Number(changes) === 0 ? null : selectById(tx, input.personaId, input.id);
       });
     },
 
@@ -514,7 +543,7 @@ export function createEventRepository(store: Store) {
           )
           .run(input.updatedAt, input.personaId, input.id).changes;
 
-        return Number(changes) === 0 ? null : selectById(tx, input.id);
+        return Number(changes) === 0 ? null : selectById(tx, input.personaId, input.id);
       });
     },
 
@@ -550,9 +579,10 @@ export function createEventRepository(store: Store) {
           .prepare(
             `UPDATE events
                 SET status = ?, status_reason = ?, updated_at = ?
-              WHERE id = ? AND status = 'received' AND archive_state = 'none'`,
+              WHERE id = ? AND persona_id = ?
+                AND status = 'received' AND archive_state = 'none'`,
           )
-          .run(outcome.status, outcome.reason, input.updatedAt, input.id).changes;
+          .run(outcome.status, outcome.reason, input.updatedAt, input.id, input.personaId).changes;
 
         if (Number(changes) !== 1) {
           throw new PersistenceError(
@@ -562,7 +592,7 @@ export function createEventRepository(store: Store) {
           );
         }
 
-        const written = selectById(tx, input.id);
+        const written = selectById(tx, input.personaId, input.id);
         if (written === null) {
           throw new Error('event commit did not produce a row');
         }
@@ -590,7 +620,7 @@ export function createEventRepository(store: Store) {
           )
           .run(input.reason, input.updatedAt, input.personaId, input.id).changes;
 
-        return Number(changes) === 0 ? null : selectById(tx, input.id);
+        return Number(changes) === 0 ? null : selectById(tx, input.personaId, input.id);
       });
     },
 
@@ -614,7 +644,7 @@ export function createEventRepository(store: Store) {
           )
           .run(input.reason, input.updatedAt, input.personaId, input.id).changes;
 
-        return Number(changes) === 0 ? null : selectById(tx, input.id);
+        return Number(changes) === 0 ? null : selectById(tx, input.personaId, input.id);
       });
     },
   };

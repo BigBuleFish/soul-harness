@@ -129,7 +129,7 @@ function codeOf(run: () => unknown): string {
 }
 
 function snapshot(store: Store, id: TaskId) {
-  const row = createRepositories(store).tasks.getById(id);
+  const row = createRepositories(store).tasks.getById({ personaId: personaId(1), id });
   return row === null ? null : { ...row };
 }
 
@@ -162,7 +162,9 @@ describe('insertQueuedTask', () => {
 
     insertTask(a, 1, { payloadRefs: { eventId: eventId(1), threadId: threadId(1) } });
 
-    expect(createRepositories(a).tasks.getById(taskId(1))?.payloadJson).toStrictEqual({
+    expect(
+      createRepositories(a).tasks.getById({ personaId: personaId(1), id: taskId(1) })?.payloadJson,
+    ).toStrictEqual({
       eventId: eventId(1),
       threadId: threadId(1),
     });
@@ -426,6 +428,7 @@ describe('completeTask', () => {
     claim(a);
 
     const done = createRepositories(a).tasks.completeTask({
+      personaId: personaId(1),
       id: taskId(1),
       runId: runId(1),
       expectedAttempt: 1,
@@ -443,6 +446,7 @@ describe('completeTask', () => {
     const before = snapshot(a, taskId(1));
 
     const result = createRepositories(a).tasks.completeTask({
+      personaId: personaId(1),
       id: taskId(1),
       runId: runId(2),
       expectedAttempt: 1,
@@ -461,6 +465,7 @@ describe('completeTask', () => {
 
     expect(
       createRepositories(a).tasks.completeTask({
+        personaId: personaId(1),
         id: taskId(1),
         runId: runId(1),
         expectedAttempt: 2,
@@ -476,6 +481,7 @@ describe('completeTask', () => {
 
     expect(
       createRepositories(a).tasks.completeTask({
+        personaId: personaId(1),
         id: taskId(1),
         runId: runId(1),
         expectedAttempt: 1,
@@ -493,6 +499,7 @@ describe('failTask', () => {
     claim(a);
 
     const requeued = createRepositories(a).tasks.failTask({
+      personaId: personaId(1),
       id: taskId(1),
       runId: runId(1),
       expectedAttempt: 1,
@@ -518,6 +525,7 @@ describe('failTask', () => {
     claim(a);
 
     const failed = createRepositories(a).tasks.failTask({
+      personaId: personaId(1),
       id: taskId(1),
       runId: runId(1),
       expectedAttempt: 1,
@@ -538,6 +546,7 @@ describe('failTask', () => {
 
     expect(
       createRepositories(a).tasks.failTask({
+        personaId: personaId(1),
         id: taskId(1),
         runId: runId(1),
         expectedAttempt: 1,
@@ -558,6 +567,7 @@ describe('failTask', () => {
 
     expect(
       createRepositories(a).tasks.failTask({
+        personaId: personaId(1),
         id: taskId(1),
         runId: runId(2),
         expectedAttempt: 1,
@@ -578,6 +588,7 @@ describe('failTask', () => {
 
     expect(
       createRepositories(a).tasks.failTask({
+        personaId: personaId(1),
         id: taskId(1),
         runId: runId(1),
         expectedAttempt: 2,
@@ -596,6 +607,7 @@ describe('failTask', () => {
     claim(a);
 
     const requeued = createRepositories(a).tasks.failTask({
+      personaId: personaId(1),
       id: taskId(1),
       runId: runId(1),
       expectedAttempt: 1,
@@ -660,6 +672,7 @@ describe('failTask', () => {
       expect(
         codeOf(() =>
           createRepositories(a).tasks.failTask({
+            personaId: personaId(1),
             id: taskId(1),
             runId: runId(1),
             expectedAttempt: 1,
@@ -684,6 +697,7 @@ describe('failExhaustedTask', () => {
 
     expect(
       createRepositories(a).tasks.failExhaustedTask({
+        personaId: personaId(1),
         id: taskId(1),
         expectedState: 'queued',
         expectedAttempt: 3,
@@ -702,6 +716,7 @@ describe('failExhaustedTask', () => {
 
     expect(
       createRepositories(a).tasks.failExhaustedTask({
+        personaId: personaId(1),
         id: taskId(1),
         expectedState: 'paused',
         expectedAttempt: 4,
@@ -720,6 +735,7 @@ describe('failExhaustedTask', () => {
 
     expect(
       createRepositories(a).tasks.failExhaustedTask({
+        personaId: personaId(1),
         id: taskId(1),
         expectedState: 'queued',
         expectedAttempt: 1,
@@ -997,6 +1013,7 @@ describe('setTaskState', () => {
 
     expect(
       tasks.setTaskState({
+        personaId: personaId(1),
         id: taskId(1),
         expectedState: 'queued',
         nextState: 'paused',
@@ -1006,6 +1023,7 @@ describe('setTaskState', () => {
 
     expect(
       tasks.setTaskState({
+        personaId: personaId(1),
         id: taskId(1),
         expectedState: 'paused',
         nextState: 'queued',
@@ -1013,7 +1031,7 @@ describe('setTaskState', () => {
         maxAttempts: 3,
       })?.state,
     ).toBe('queued');
-    expect(tasks.getById(taskId(1))?.finishedAt).toBeNull();
+    expect(tasks.getById({ personaId: personaId(1), id: taskId(1) })?.finishedAt).toBeNull();
   });
 
   it('refuses to resume a task at the cap', () => {
@@ -1026,6 +1044,7 @@ describe('setTaskState', () => {
 
     expect(
       createRepositories(a).tasks.setTaskState({
+        personaId: personaId(1),
         id: taskId(1),
         expectedState: 'paused',
         nextState: 'queued',
@@ -1046,6 +1065,7 @@ describe('setTaskState', () => {
 
     expect(
       tasks.setTaskState({
+        personaId: personaId(1),
         id: taskId(1),
         expectedState: 'queued',
         nextState: 'cancelled',
@@ -1055,6 +1075,7 @@ describe('setTaskState', () => {
 
     expect(
       tasks.setTaskState({
+        personaId: personaId(1),
         id: taskId(2),
         expectedState: 'paused',
         nextState: 'cancelled',
@@ -1072,6 +1093,7 @@ describe('setTaskState', () => {
     expect(
       codeOf(() =>
         createRepositories(a).tasks.setTaskState({
+          personaId: personaId(1),
           id: taskId(1),
           expectedState: 'queued',
           nextState: 'cancelled',
@@ -1084,6 +1106,7 @@ describe('setTaskState', () => {
     expect(
       codeOf(() =>
         createRepositories(a).tasks.setTaskState({
+          personaId: personaId(1),
           id: taskId(1),
           expectedState: 'paused',
           nextState: 'paused',
