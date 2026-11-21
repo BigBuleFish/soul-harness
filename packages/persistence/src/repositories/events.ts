@@ -346,12 +346,50 @@ function selectById(source: StatementSource, personaId: PersonaId, id: EventId):
   return raw === undefined ? null : mapEvent(raw);
 }
 
+/**
+ * Rejects an event that points at a session owned by another persona.
+ *
+ * `events.session_id` has a plain FK to `sessions(id)`, so the database alone
+ * cannot tell whether the target belongs to the event's persona. The check runs
+ * inside the write transaction (`BEGIN IMMEDIATE`, so no other writer can change
+ * the session row between the SELECT and the INSERT) and before the event row is
+ * written. A missing session keeps the FK semantics (`foreign_key_violation`).
+ */
+function assertSessionOwnedByPersona(
+  tx: StatementSource,
+  sessionId: SessionId | null | undefined,
+  personaId: PersonaId,
+): void {
+  if (sessionId === null || sessionId === undefined) {
+    return;
+  }
+  const owner = oneRow<{ persona_id: string }>(
+    tx.prepare('SELECT persona_id FROM sessions WHERE id = ?'),
+    sessionId,
+  );
+  if (owner === undefined) {
+    throw new PersistenceError(
+      'foreign_key_violation',
+      'event references a session that does not exist',
+      { details: { column: 'session_id' } },
+    );
+  }
+  if (owner.persona_id !== personaId) {
+    throw new PersistenceError(
+      'foreign_key_violation',
+      'event session must belong to the same persona as the event',
+      { details: { column: 'session_id' } },
+    );
+  }
+}
+
 export function createEventRepository(store: Store) {
   return {
     insert(input: InsertEventInput): EventRow {
       assertInsertInput(input);
 
       return withWrite(store, (tx) => {
+        assertSessionOwnedByPersona(tx, input.sessionId, input.personaId);
         // Archive columns are intentionally absent: P1 has no Archive Writer.
         tx.prepare(
           `INSERT INTO events
@@ -558,6 +596,7 @@ export function createEventRepository(store: Store) {
       const outcome = assertCommitInput(input);
 
       return withWrite(store, (tx) => {
+        assertSessionOwnedByPersona(tx, input.sessionId, input.personaId);
         tx.prepare(
           `INSERT INTO events
              (id, persona_id, session_id, source, adapter_id, adapter_event_ref, status,
