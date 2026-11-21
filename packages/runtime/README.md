@@ -119,7 +119,7 @@
 
 `incomplete.reason` 是封闭集合：`row_budget_exceeded` / `scan_query_budget_exceeded` / `persona_budget_exceeded` / `probe_budget_exceeded` / `aborted` / `archive_state_present` / `unexpected_event_status` / `invalid_task_row` / `concurrent_modification`。条件写返回 `null` 视为并发修改，**不**当作已成功收口。
 
-U1 的 `attempt` 必须是**安全整数**且 `≥ 1`（与 Persistence 的 `recoverRunningTask` 前置条件一致）。超出 `Number.MAX_SAFE_INTEGER` 的 INTEGER 无法被 SQLite 驱动物化成 JS number（读回抛 `RangeError`），这类行同样按 `invalid_task_row` fail closed，既不当成成功，也不把驱动错误泄漏成崩溃。
+U1 的 `attempt` 必须是**安全整数**且 `≥ 1`（与 Persistence 的 `recoverRunningTask` 前置条件一致）。超出 `Number.MAX_SAFE_INTEGER` 的 INTEGER 无法被 SQLite 驱动物化成 JS number（读回抛 `RangeError`），这类行同样按 `invalid_task_row` fail closed，既不当成成功，也不把驱动错误泄漏成崩溃。普通扫描（U1–U4b）与全局探测（U1–U4b 的边界探测）共用这条规则；探测阶段发现无法物化的行时，`invalid_task_row` 会覆盖此前的预算停止原因，不会被 `scan_query_budget_exceeded` 遮蔽，也不会被当作「探测为空」而报告完整。
 
 `policy` 与 Scheduler 共用同一对象：Recovery 只读 `maxAttempts`，不使用 `retryBackoffMs`（退避由 Scheduler 计算 `nextScheduledAt`）。`now()` 每次读取都校验为非负安全整数，非法 → `invalid_clock`；参数非法 → `invalid_argument`，均在数据库操作之前。
 

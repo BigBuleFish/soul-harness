@@ -818,56 +818,85 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
     return true;
   };
 
+  /**
+   * Probe-phase task read.
+   *
+   * The probe usually runs with `stop` already set to the budget reason that
+   * ended the scan. A row the driver cannot materialize (INTEGER above
+   * `Number.MAX_SAFE_INTEGER`) is a new, more specific failure, so it replaces
+   * that reason — the probe must never turn a read error into "probe empty" or
+   * let the earlier budget reason hide it.
+   */
+  const readProbeTasks = (
+    personaId: PersonaId,
+    read: () => readonly TaskRow[],
+  ): readonly TaskRow[] | null => {
+    try {
+      return read();
+    } catch (error) {
+      if (error instanceof RangeError) {
+        stop = { reason: 'invalid_task_row', detail: { personaId } };
+        return null;
+      }
+      throw error;
+    }
+  };
+
   const probeUnit = (personaId: PersonaId, unit: UnitId, cursor: string | undefined): boolean => {
+    const probeTasks = (read: () => readonly TaskRow[]): boolean => {
+      const rows = readProbeTasks(personaId, read);
+      return rows !== null && rows.length > 0;
+    };
+
     switch (unit) {
       case 'U1':
-        return (
+        return probeTasks(() =>
           repos.tasks.listPageByPersonaState({
             personaId,
             state: 'running',
             limit: 1,
             ...(cursor === undefined ? {} : { afterId: cursor as TaskId }),
-          }).length > 0
+          }),
         );
       case 'U2':
-        return (
+        return probeTasks(() =>
           repos.tasks.listPageByPersonaState({
             personaId,
             state: 'queued',
             limit: 1,
             attemptFilter: { kind: 'invalid' },
             ...(cursor === undefined ? {} : { afterId: cursor as TaskId }),
-          }).length > 0
+          }),
         );
       case 'U3':
-        return (
+        return probeTasks(() =>
           repos.tasks.listPageByPersonaState({
             personaId,
             state: 'queued',
             limit: 1,
             attemptFilter: { kind: 'atLeast', value: cfg.policy.maxAttempts },
             ...(cursor === undefined ? {} : { afterId: cursor as TaskId }),
-          }).length > 0
+          }),
         );
       case 'U4':
-        return (
+        return probeTasks(() =>
           repos.tasks.listPageByPersonaState({
             personaId,
             state: 'paused',
             limit: 1,
             attemptFilter: { kind: 'invalid' },
             ...(cursor === undefined ? {} : { afterId: cursor as TaskId }),
-          }).length > 0
+          }),
         );
       case 'U4b':
-        return (
+        return probeTasks(() =>
           repos.tasks.listPageByPersonaState({
             personaId,
             state: 'paused',
             limit: 1,
             attemptFilter: { kind: 'atLeast', value: cfg.policy.maxAttempts },
             ...(cursor === undefined ? {} : { afterId: cursor as TaskId }),
-          }).length > 0
+          }),
         );
       case 'U5r':
       case 'U5a':
@@ -921,6 +950,11 @@ export async function recoverRuntime(options: RecoverRuntimeOptions): Promise<Re
         }
         if (probeUnit(personaId, unit, entry?.cursor)) {
           abort(failure);
+          return;
+        }
+        // A probe read error already replaced `stop`; stop probing right away so
+        // the fail-closed reason cannot be lost after a later empty probe.
+        if (pendingStop()?.reason === 'invalid_task_row') {
           return;
         }
       }

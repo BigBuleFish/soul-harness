@@ -664,6 +664,33 @@ describe('recoverRuntime — task state handling', () => {
     expect(after?.run_unchanged).toBe(1);
   });
 
+  it('R2: an unreadable INTEGER is fail-closed during the global probe, not a driver error', async () => {
+    const { store } = openFixture();
+    seedPersona(store, 1);
+    seedTask(store, 1);
+    claimRunning(store, 1);
+    // 2^53 fits int64 → stored as INTEGER → materializing it as a JS number
+    // throws RangeError.
+    mutate(store, 'UPDATE tasks SET attempt = ? WHERE id = ?', 9_007_199_254_740_992, tid(1));
+
+    // One query is spent enumerating personas, so the task scan cannot start and
+    // the U1 boundary probe is the first reader of this row.
+    const report = await recover(store, { maxScanQueries: 1 });
+
+    expect(report.incomplete?.reason).toBe('invalid_task_row');
+    expect(report.incomplete?.detail?.personaId).toBe(pid(1));
+    expect(report.tasks).toStrictEqual({ requeued: 0, failed: 0 });
+    const after = rawGet<{ state: string; attempt_unchanged: number; run_unchanged: number }>(
+      store,
+      'SELECT state AS state, attempt = 9007199254740992 AS attempt_unchanged, run_id = ? AS run_unchanged FROM tasks WHERE id = ?',
+      rid(1),
+      tid(1),
+    );
+    expect(after?.state).toBe('running');
+    expect(after?.attempt_unchanged).toBe(1);
+    expect(after?.run_unchanged).toBe(1);
+  });
+
   it('U1: a null started_at fails closed', async () => {
     const { store } = openFixture();
     seedPersona(store, 1);
