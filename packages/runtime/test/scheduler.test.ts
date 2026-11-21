@@ -720,6 +720,58 @@ describe('settlement', () => {
     expect(taskRow(fixture, 1)).toMatchObject({ state: 'running', attempt: 99 });
   });
 
+  it('reports a failure settle CAS miss without overwriting the row', async () => {
+    const fixture = openFixture();
+    seedPersona(fixture, 1);
+    seedTask(fixture, 1);
+    const gate = deferred();
+    const { entries, logger } = captureLogs();
+    const scheduler = makeScheduler(fixture, {
+      logger,
+      handlers: {
+        'thought.run': async () => {
+          await gate.promise;
+        },
+      },
+    });
+
+    scheduler.start();
+    await scheduler.tick();
+    withWrite(fixture.store, (tx) => {
+      tx.prepare('UPDATE tasks SET run_id = ?, attempt = ? WHERE id = ?').run(
+        'run_00000000000000000000000009',
+        7,
+        tid(1),
+      );
+    });
+    const mutated = taskRow(fixture, 1);
+    expect(mutated).toMatchObject({
+      state: 'running',
+      attempt: 7,
+      runId: 'run_00000000000000000000000009',
+    });
+
+    gate.reject(new Error('handler failed after a concurrent change'));
+    await flushAll();
+
+    expect(taskRow(fixture, 1)).toStrictEqual(mutated);
+    const conflict = entries.find((entry) => entry.event === 'scheduler_settle_conflict');
+    expect(conflict?.fields).toMatchObject({
+      personaId: pid(1),
+      taskId: tid(1),
+      attempt: 1,
+      code: 'concurrent_modification',
+    });
+    expect(JSON.stringify(entries)).not.toContain('handler failed after a concurrent change');
+    expect(scheduler.stats().activeHandlers).toBe(0);
+
+    await scheduler.stop();
+    expect(scheduler.state).toBe('stopped');
+    await expect(
+      recoverRuntime({ store: fixture.store, logger: silentLogger, policy: POLICY }),
+    ).resolves.toBeDefined();
+  });
+
   it('Recovery requeues a crashed run without bumping attempt', async () => {
     const fixture = openFixture();
     seedPersona(fixture, 1);
@@ -1101,6 +1153,36 @@ describe('wake-ups and timers', () => {
     scheduler.start();
     await flushAll();
     expect(calls).toHaveLength(1);
+  });
+
+  it('rejects enqueue for an unregistered kind and writes no task row', async () => {
+    const fixture = openFixture();
+    seedPersona(fixture, 1);
+    const calls: TaskRow[] = [];
+    const scheduler = makeScheduler(fixture, {
+      handlers: { 'thought.run': (task) => void calls.push(task) },
+    });
+
+    await expect(
+      scheduler.enqueueTask({ personaId: pid(1), kind: 'missing.run', channel: 'inner' }),
+    ).rejects.toMatchObject({ code: 'invalid_argument' });
+    expect(
+      fixture.repos.tasks.listByPersonaState({ personaId: pid(1), state: 'queued' }),
+    ).toStrictEqual([]);
+
+    // The other path — a row inserted directly through persistence — is never
+    // claimed either, so the Scheduler check cannot be bypassed.
+    fixture.repos.tasks.insertQueuedTask({
+      id: tid(9),
+      personaId: pid(1),
+      kind: 'missing.run',
+      channel: 'inner',
+    });
+    scheduler.start();
+    await flushAll();
+
+    expect(calls).toHaveLength(0);
+    expect(taskRow(fixture, 9)).toMatchObject({ state: 'queued', attempt: 0 });
   });
 });
 

@@ -372,7 +372,7 @@ export function createScheduler(options: SchedulerOptions): TaskScheduler {
     });
     try {
       const now = clock();
-      repos.tasks.failTask({
+      const failed = repos.tasks.failTask({
         id: entry.taskId,
         personaId: entry.personaId,
         runId: entry.runId,
@@ -382,10 +382,22 @@ export function createScheduler(options: SchedulerOptions): TaskScheduler {
         finishedAt: now,
         nextScheduledAt: now + cfg.policy.retryBackoffMs,
       });
+      if (failed === null) {
+        // CAS miss: the row moved on. Report it, never write an unconditional
+        // fallback and never retry this failure blindly.
+        safeLog(cfg.logger, 'warn', 'scheduler_settle_conflict', {
+          personaId: entry.personaId,
+          taskId: entry.taskId,
+          attempt: entry.attempt,
+          code: 'concurrent_modification',
+        });
+      }
     } catch (settleError) {
       // Keep the real error, do not pretend the task succeeded or failed.
       safeLog(cfg.logger, 'error', 'scheduler_settle_failed', {
+        personaId: entry.personaId,
         taskId: entry.taskId,
+        attempt: entry.attempt,
         code: errorCode(settleError),
       });
     }
@@ -408,13 +420,17 @@ export function createScheduler(options: SchedulerOptions): TaskScheduler {
       });
       if (updated === null) {
         safeLog(cfg.logger, 'warn', 'scheduler_settle_conflict', {
+          personaId: entry.personaId,
           taskId: entry.taskId,
+          attempt: entry.attempt,
           code: 'concurrent_modification',
         });
       }
     } catch (error) {
       safeLog(cfg.logger, 'error', 'scheduler_settle_failed', {
+        personaId: entry.personaId,
         taskId: entry.taskId,
+        attempt: entry.attempt,
         code: errorCode(error),
       });
     }
@@ -715,6 +731,13 @@ export function createScheduler(options: SchedulerOptions): TaskScheduler {
 
   const enqueueTask = async (input: EnqueueTaskInput): Promise<TaskRow> => {
     assertNotStopped('enqueueTask');
+    // P1: a task whose kind has no handler could never be claimed; reject it
+    // before allocating an id or touching the database.
+    if (typeof input.kind !== 'string' || !handlers.has(input.kind)) {
+      throw new RuntimeError('invalid_argument', 'kind has no registered handler', {
+        details: { operation: 'enqueueTask' },
+      });
+    }
     const taskId = allocateTaskId({
       now: () => clock(),
       isOccupied: (candidate) =>

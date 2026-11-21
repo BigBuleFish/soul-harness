@@ -140,7 +140,7 @@ U1 的 `attempt` 必须是**安全整数**且 `≥ 1`（与 Persistence 的 `rec
 | `wake()` | 请求一次 pump；非 `running` 时无操作 |
 | `tick()` | 单飞执行一次领取/派发；非 `running` 返回零报告且不访问 Store |
 | `stop()` | 置 `stopping`、清定时器、等待在途 Handler 收口，然后 `stopped` 并释放 lease |
-| `enqueueTask({ personaId, kind, channel, priority?, payloadRefs?, scheduledAt? })` | 分配内部 taskId、经 `insertQueuedTask` 入队并唤醒 |
+| `enqueueTask({ personaId, kind, channel, priority?, payloadRefs?, scheduledAt? })` | `kind` 必须已注册（否则 `invalid_argument`，不分配 id、不落库）；分配内部 taskId、经 `insertQueuedTask` 入队并唤醒 |
 | `pauseTask` / `resumeTask` / `cancelTask({ personaId, taskId })` | 具名 CAS 迁移；未命中抛 `illegal_transition`，不盲写 |
 
 **领取与排序**：只在 Persona 为 `RUNNING`、任务 `queued` 且已到期、kind 已注册、并发有额度时，通过 `claimNext` 原子领取。排序完全由 Persistence 决定：`priority DESC`，同优先级 `scheduled_at IS NULL` 最后、`scheduled_at` 升序、`id` 升序。
@@ -277,7 +277,7 @@ metrics(): { 'dedupe.body_unverifiable': number }
 | `test/allocator-sample.test.ts` | 2 项。每个前缀 10000 个 ID，另加同毫秒突发 10000 个；全部通过 contracts 的 `is*` / `parse*`，样本内唯一 |
 | `test/persona-lifecycle.test.ts` | 24 项。真实迁移后的 SQLite：合法与非法转移、任意状态 stop、按 boot 区分的崩溃归一、按 ID 恢复且不新建、多人格隔离、同人格并发、过期 version 不覆盖、epoch 不变、检查点不被生命周期写掉、分页列表、日志失败不掩盖提交、双连接读快照、非法参数拒绝 Promise。创建路径另含：预检查发现 id 已占用时换号、插入撞上真实主键冲突时换号且不留下半截行、重试耗尽返回 `id_collision`、非唯一约束错误原样抛出 |
 | `test/ingress.test.ts` | 33 项。真实 SQLite：信封正反例与注入时钟、去重不插第二行且不声称正文一致、终态不重开、唯一约束冲突后的幂等收敛、会话复用与关闭后新建、金丝雀正文只活在 TTL 缓冲里、source 与人格两级在途上限、入队前背压、过期正文不可读、受理期间 TTL 到期时返回值与库一致、提交后时钟抛错仍返回已提交状态并进入无正文收口队列、TTL 元数据失败后的重试且时钟抛错不产生未处理 rejection、定时器登记失败与提前触发后重注册失败都收成 `processing_failed`、快照不被事后篡改、`receivedAt` 取入口时间、人格与 source 隔离、同人格串行、日志失败不掩盖结果、非法配置与非法参数拒绝 Promise |
-| `test/scheduler.test.ts` | 48 项。真实 SQLite + 注入时钟/手动定时器：配置与 policy 校验、未注册 kind 不领取、attempt/runId 语义、priority / scheduled_at / id 排序、未到期与人格门控、每单元与全局并发、轮转公平、成功/失败收口、固定退避、maxAttempts 终止、Recovery 不增 attempt、pause/resume/cancel 与 running 取消拒绝、CAS 冲突不盲写、stop 等待与不重启、Store lease 双向互斥与异常释放、最早到期定时唤醒、wake 恢复、零忙轮询、日志不含 payload/异常正文、源码无 SQL、入口不导出 lease 内部件 |
+| `test/scheduler.test.ts` | 50 项。真实 SQLite + 注入时钟/手动定时器：配置与 policy 校验、未注册 kind 不领取、attempt/runId 语义、priority / scheduled_at / id 排序、未到期与人格门控、每单元与全局并发、轮转公平、成功/失败收口、固定退避、maxAttempts 终止、Recovery 不增 attempt、pause/resume/cancel 与 running 取消拒绝、CAS 冲突不盲写、stop 等待与不重启、Store lease 双向互斥与异常释放、最早到期定时唤醒、wake 恢复、零忙轮询、日志不含 payload/异常正文、源码无 SQL、入口不导出 lease 内部件 |
 
 OPEN-7 的样本量就是那两个 **10000**。不把「统计上永不碰撞」写成验收。
 
