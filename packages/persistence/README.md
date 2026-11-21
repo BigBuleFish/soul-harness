@@ -252,11 +252,11 @@ Ingress 需要两件现有方法做不到的事：在一个写事务里区分「
 | `insertQueuedTask({ id, personaId, kind, channel, priority?, payloadRefs?, scheduledAt? })` | 无 state/attempt 入参 | 只能生成 `queued`、`attempt=0`、`run_id`/`started_at`/`finished_at` 全 NULL |
 | `claimNext({ personaId, channel, now, runId, maxAttempts, kinds })` | queued + 同 channel + 到期 + `typeof(attempt)='integer'` + `0 ≤ attempt < max` + `kind IN (…)` + 人格 `RUNNING` | 单条 `UPDATE … RETURNING id`：`attempt+1`、写新 `run_id`、`started_at=now`、清 `finished_at`。`kinds` 为空 → 返回 `null` 且**不访问数据库** |
 | `completeTask({ id, runId, expectedAttempt, finishedAt })` | `state='running'` + `run_id` + `attempt` | `done` |
-| `failTask({ id, runId, expectedAttempt, maxAttempts, retry, finishedAt, nextScheduledAt? })` | 同上 | `attempt < max` 时退回 `queued`（`finished_at=NULL`、`scheduled_at=nextScheduledAt`）；否则 `failed`。**即使 `retry=true`，到上限也只会 `failed`** |
+| `failTask({ id, runId, expectedAttempt, maxAttempts, retry, finishedAt, nextScheduledAt })` | 同上 | `nextScheduledAt` **必填**（`number \| null`，`null` 表示立即到期）；`attempt < max` 时退回 `queued`（`finished_at=NULL`、`scheduled_at=nextScheduledAt`）；否则 `failed`。**即使 `retry=true`，到上限也只会 `failed`**。省略该字段 → `invalid_argument`，Persistence 不推导退避 |
 | `failExhaustedTask({ id, expectedState, expectedAttempt, maxAttempts, finishedAt })` | `state ∈ {queued, paused}` + `attempt = ?` + `attempt ≥ max` | `failed` |
 | `recoverRunningTask({ id, personaId, expectedRunId, expectedAttempt, maxAttempts, finishedAt })` | `state='running'` + `persona_id` + `run_id` + `attempt` + attempt 合法性 | `attempt < max` → `queued`（attempt 不变）；否则 `failed`（`finished_at=finishedAt`） |
 | `setTaskState({ id, expectedState, nextState, at, maxAttempts? })` | 仅四对：`queued→paused`、`paused→queued`、`queued→cancelled`、`paused→cancelled` | 取消写 `finished_at=at`；`paused→queued` 额外要求 attempt 合法且 `< maxAttempts` |
-| `listPageByPersonaState({ personaId, state, afterId?, limit?, attemptFilter? })` | 键集分页（`id` 游标） | `attemptFilter = {kind:'atLeast',value}` 只匹配合法 attempt；`{kind:'invalid'}` 匹配 `claimNext` 永远领不到的行 |
+| `listPageByPersonaState({ personaId, state, afterId?, limit?, attemptFilter? })` | 键集分页（`id` 游标） | `attemptFilter` **形状严格**：`{kind:'atLeast',value}` 恰好两个键（value 为非负安全整数），只匹配合法 attempt；`{kind:'invalid'}` 恰好一个键，匹配 `claimNext` 永远领不到的行。额外键、`null`、数组、非对象 → `invalid_argument`，在查询前拒绝 |
 | `nextDueAt({ after })` | `queued` + `scheduled_at > after` + 合法 attempt | 最早未来到期时间或 `null` |
 
 约束：

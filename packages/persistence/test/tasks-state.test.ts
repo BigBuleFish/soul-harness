@@ -18,6 +18,7 @@ import {
   migrate,
   openStore,
   type ClaimNextTaskInput,
+  type FailTaskInput,
   type InsertQueuedTaskInput,
   type Store,
 } from '../src/index.js';
@@ -180,13 +181,40 @@ describe('insertQueuedTask', () => {
     expect(snapshot(a, taskId(1))).toBeNull();
   });
 
-  it('rejects a payload value that is not a branded id', () => {
+  it('rejects payload values that are not branded ids', () => {
     const { a } = openFixture();
     seedPersona(a);
 
     expect(codeOf(() => insertTask(a, 1, { payloadRefs: { eventId: 'evt_bad' as EventId } }))).toBe(
       'invalid_argument',
     );
+    expect(codeOf(() => insertTask(a, 2, { payloadRefs: { threadId: 'x' as ThreadId } }))).toBe(
+      'invalid_argument',
+    );
+    expect(snapshot(a, taskId(1))).toBeNull();
+    expect(snapshot(a, taskId(2))).toBeNull();
+  });
+
+  it('rejects nodeId, which P1 does not support', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    const refs = { nodeId: 'node-1' } as unknown as NonNullable<
+      InsertQueuedTaskInput['payloadRefs']
+    >;
+
+    expect(codeOf(() => insertTask(a, 1, { payloadRefs: refs }))).toBe('invalid_argument');
+    expect(snapshot(a, taskId(1))).toBeNull();
+  });
+
+  it('rejects free text smuggled into payload references', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    const refs = { text: 'hello world' } as unknown as NonNullable<
+      InsertQueuedTaskInput['payloadRefs']
+    >;
+
+    expect(codeOf(() => insertTask(a, 1, { payloadRefs: refs }))).toBe('invalid_argument');
+    expect(snapshot(a, taskId(1))).toBeNull();
   });
 
   it('rejects an invalid kind', () => {
@@ -311,6 +339,16 @@ describe('claimNext', () => {
     expect(snapshot(a, taskId(1))).toMatchObject({ state: 'queued', attempt: 0, runId: null });
   });
 
+  it('skips tasks whose persona is STOPPED', () => {
+    const { a } = openFixture();
+    seedPersona(a, personaId(1), 'STOPPED');
+    insertTask(a);
+    const before = snapshot(a, taskId(1));
+
+    expect(claim(a)).toBeNull();
+    expect(snapshot(a, taskId(1))).toStrictEqual(before);
+  });
+
   it('prefers the higher priority', () => {
     const { a } = openFixture();
     seedPersona(a);
@@ -348,6 +386,17 @@ describe('claimNext', () => {
 
     expect(claim(a)?.id).toBe(taskId(3));
     expect(claim(a, { runId: runId(2) })).toBeNull();
+  });
+
+  it('never claims a row whose attempt exceeds the safe integer range', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertRawQueued(a, taskId(1), 1e20);
+    insertTask(a, 2);
+    const before = snapshot(a, taskId(1));
+
+    expect(claim(a)?.id).toBe(taskId(2));
+    expect(snapshot(a, taskId(1))).toStrictEqual(before);
   });
 
   it('lets exactly one of two connections claim the same task', () => {
@@ -475,6 +524,7 @@ describe('failTask', () => {
       maxAttempts: 1,
       retry: true,
       finishedAt: NOW + 5,
+      nextScheduledAt: NOW + 20,
     });
 
     expect(failed).toMatchObject({ state: 'failed', finishedAt: NOW + 5 });
@@ -494,6 +544,7 @@ describe('failTask', () => {
         maxAttempts: 3,
         retry: false,
         finishedAt: NOW + 5,
+        nextScheduledAt: null,
       }),
     ).toMatchObject({ state: 'failed' });
   });
@@ -513,6 +564,7 @@ describe('failTask', () => {
         maxAttempts: 3,
         retry: true,
         finishedAt: NOW + 5,
+        nextScheduledAt: NOW + 20,
       }),
     ).toBeNull();
     expect(snapshot(a, taskId(1))).toStrictEqual(before);
@@ -532,8 +584,94 @@ describe('failTask', () => {
         maxAttempts: 3,
         retry: true,
         finishedAt: NOW + 5,
+        nextScheduledAt: NOW + 20,
       }),
     ).toBeNull();
+  });
+
+  it('R2: accepts an explicit null schedule and leaves scheduled_at NULL', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a, 1, { scheduledAt: NOW - 10 });
+    claim(a);
+
+    const requeued = createRepositories(a).tasks.failTask({
+      id: taskId(1),
+      runId: runId(1),
+      expectedAttempt: 1,
+      maxAttempts: 3,
+      retry: true,
+      finishedAt: NOW + 5,
+      nextScheduledAt: null,
+    });
+
+    expect(requeued).toMatchObject({ state: 'queued', scheduledAt: null, finishedAt: null });
+  });
+
+  it('R2: rejects an omitted nextScheduledAt before the transaction', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a);
+    claim(a);
+    const before = snapshot(a, taskId(1));
+    const omitted = {
+      id: taskId(1),
+      runId: runId(1),
+      expectedAttempt: 1,
+      maxAttempts: 3,
+      retry: true,
+      finishedAt: NOW + 5,
+    } as unknown as FailTaskInput;
+
+    expect(codeOf(() => createRepositories(a).tasks.failTask(omitted))).toBe('invalid_argument');
+    expect(snapshot(a, taskId(1))).toStrictEqual(before);
+  });
+
+  it('R2: rejects an explicit undefined nextScheduledAt', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a);
+    claim(a);
+    const before = snapshot(a, taskId(1));
+    const withUndefined = {
+      id: taskId(1),
+      runId: runId(1),
+      expectedAttempt: 1,
+      maxAttempts: 3,
+      retry: true,
+      finishedAt: NOW + 5,
+      nextScheduledAt: undefined,
+    } as unknown as FailTaskInput;
+
+    expect(codeOf(() => createRepositories(a).tasks.failTask(withUndefined))).toBe(
+      'invalid_argument',
+    );
+    expect(snapshot(a, taskId(1))).toStrictEqual(before);
+  });
+
+  it('R2: rejects an invalid nextScheduledAt', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a);
+    claim(a);
+    const before = snapshot(a, taskId(1));
+
+    for (const bad of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(
+        codeOf(() =>
+          createRepositories(a).tasks.failTask({
+            id: taskId(1),
+            runId: runId(1),
+            expectedAttempt: 1,
+            maxAttempts: 3,
+            retry: true,
+            finishedAt: NOW + 5,
+            nextScheduledAt: bad,
+          }),
+        ),
+      ).toBe('invalid_argument');
+    }
+    expect(snapshot(a, taskId(1))).toStrictEqual(before);
   });
 });
 
@@ -593,8 +731,8 @@ describe('failExhaustedTask', () => {
   });
 });
 
-describe('recoverRunningTask', () => {
-  it('requeues a crashed attempt below the cap without bumping attempt', () => {
+describe('recoverRunningTask (R3 matrix)', () => {
+  it('R3-1: attempt < max requeues with attempt/run/started unchanged and finished NULL', () => {
     const { a } = openFixture();
     seedPersona(a);
     insertTask(a);
@@ -609,16 +747,23 @@ describe('recoverRunningTask', () => {
       finishedAt: NOW + 30,
     });
 
-    expect(recovered).toMatchObject({
+    expect(recovered).toStrictEqual({
+      id: taskId(1),
+      personaId: personaId(1),
+      kind: 'thought.run',
+      channel: 'inner',
       state: 'queued',
-      attempt: 1,
+      priority: 0,
       runId: runId(1),
+      payloadJson: null,
+      scheduledAt: null,
       startedAt: NOW,
       finishedAt: null,
+      attempt: 1,
     });
   });
 
-  it('fails a crashed attempt that already reached the cap', () => {
+  it('R3-2: attempt >= max fails with finishedAt and keeps the other run fields', () => {
     const { a } = openFixture();
     seedPersona(a);
     insertTask(a);
@@ -633,16 +778,153 @@ describe('recoverRunningTask', () => {
       finishedAt: NOW + 30,
     });
 
-    expect(recovered).toMatchObject({
+    expect(recovered).toStrictEqual({
+      id: taskId(1),
+      personaId: personaId(1),
+      kind: 'thought.run',
+      channel: 'inner',
       state: 'failed',
-      attempt: 1,
+      priority: 0,
       runId: runId(1),
+      payloadJson: null,
+      scheduledAt: null,
       startedAt: NOW,
       finishedAt: NOW + 30,
+      attempt: 1,
     });
   });
 
-  it('refuses a call scoped to another persona and changes nothing', () => {
+  it('R3-3: a changed run_id makes the CAS miss and leaves the row untouched', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a);
+    claim(a);
+    const before = snapshot(a, taskId(1));
+
+    expect(
+      createRepositories(a).tasks.recoverRunningTask({
+        id: taskId(1),
+        personaId: personaId(1),
+        expectedRunId: runId(2),
+        expectedAttempt: 1,
+        maxAttempts: 3,
+        finishedAt: NOW + 30,
+      }),
+    ).toBeNull();
+    expect(snapshot(a, taskId(1))).toStrictEqual(before);
+  });
+
+  it('R3-4: a changed attempt makes the CAS miss and leaves the row untouched', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a);
+    claim(a);
+    const before = snapshot(a, taskId(1));
+
+    expect(
+      createRepositories(a).tasks.recoverRunningTask({
+        id: taskId(1),
+        personaId: personaId(1),
+        expectedRunId: runId(1),
+        expectedAttempt: 2,
+        maxAttempts: 3,
+        finishedAt: NOW + 30,
+      }),
+    ).toBeNull();
+    expect(snapshot(a, taskId(1))).toStrictEqual(before);
+  });
+
+  it('R3-5: a row that is no longer running makes the CAS miss and stays untouched', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a);
+    claim(a);
+    setStateOnly(a, taskId(1), 'failed');
+    const before = snapshot(a, taskId(1));
+
+    expect(
+      createRepositories(a).tasks.recoverRunningTask({
+        id: taskId(1),
+        personaId: personaId(1),
+        expectedRunId: runId(1),
+        expectedAttempt: 1,
+        maxAttempts: 3,
+        finishedAt: NOW + 30,
+      }),
+    ).toBeNull();
+    expect(snapshot(a, taskId(1))).toStrictEqual(before);
+    expect(before?.state).toBe('failed');
+  });
+
+  it('R3-6: invalid attempt values never match the SQL guard and stay untouched', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a);
+    claim(a);
+
+    for (const bad of [0, 1.5, -1]) {
+      setAttempt(a, taskId(1), bad);
+      const before = snapshot(a, taskId(1));
+
+      expect(
+        createRepositories(a).tasks.recoverRunningTask({
+          id: taskId(1),
+          personaId: personaId(1),
+          expectedRunId: runId(1),
+          expectedAttempt: 1,
+          maxAttempts: 3,
+          finishedAt: NOW + 30,
+        }),
+      ).toBeNull();
+      expect(snapshot(a, taskId(1))).toStrictEqual(before);
+      expect(before?.state).toBe('running');
+    }
+  });
+
+  it('R3-7: both success paths keep attempt/run_id/started_at and only change state/finished_at', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a, 1);
+    insertTask(a, 2);
+    claim(a);
+    claim(a, { runId: runId(2) });
+    const beforeOne = snapshot(a, taskId(1));
+    const beforeTwo = snapshot(a, taskId(2));
+
+    const requeued = createRepositories(a).tasks.recoverRunningTask({
+      id: taskId(1),
+      personaId: personaId(1),
+      expectedRunId: runId(1),
+      expectedAttempt: 1,
+      maxAttempts: 3,
+      finishedAt: NOW + 40,
+    });
+    const failed = createRepositories(a).tasks.recoverRunningTask({
+      id: taskId(2),
+      personaId: personaId(1),
+      expectedRunId: runId(2),
+      expectedAttempt: 1,
+      maxAttempts: 1,
+      finishedAt: NOW + 41,
+    });
+
+    expect(requeued).not.toBeNull();
+    expect(failed).not.toBeNull();
+    // Requeued: untouched run identity, finished_at cleared.
+    expect(requeued?.attempt).toBe(beforeOne?.attempt);
+    expect(requeued?.runId).toBe(beforeOne?.runId);
+    expect(requeued?.startedAt).toBe(beforeOne?.startedAt);
+    expect(requeued?.state).toBe('queued');
+    expect(requeued?.finishedAt).toBeNull();
+    // Failed: same run identity, finished_at written.
+    expect(failed?.attempt).toBe(beforeTwo?.attempt);
+    expect(failed?.runId).toBe(beforeTwo?.runId);
+    expect(failed?.startedAt).toBe(beforeTwo?.startedAt);
+    expect(failed?.state).toBe('failed');
+    expect(failed?.finishedAt).toBe(NOW + 41);
+  });
+
+  it('R3-8: a row owned by A called with persona B is rejected with an identical row', () => {
     const { a } = openFixture();
     seedPersona(a);
     seedPersona(a, personaId(2));
@@ -650,20 +932,20 @@ describe('recoverRunningTask', () => {
     claim(a);
     const before = snapshot(a, taskId(1));
 
-    const result = createRepositories(a).tasks.recoverRunningTask({
-      id: taskId(1),
-      personaId: personaId(2),
-      expectedRunId: runId(1),
-      expectedAttempt: 1,
-      maxAttempts: 3,
-      finishedAt: NOW + 30,
-    });
-
-    expect(result).toBeNull();
+    expect(
+      createRepositories(a).tasks.recoverRunningTask({
+        id: taskId(1),
+        personaId: personaId(2),
+        expectedRunId: runId(1),
+        expectedAttempt: 1,
+        maxAttempts: 3,
+        finishedAt: NOW + 30,
+      }),
+    ).toBeNull();
     expect(snapshot(a, taskId(1))).toStrictEqual(before);
   });
 
-  it('migrates when the call is scoped to the owning persona', () => {
+  it('R3-9: the owning persona is accepted and the task is requeued', () => {
     const { a } = openFixture();
     seedPersona(a);
     insertTask(a);
@@ -681,73 +963,28 @@ describe('recoverRunningTask', () => {
     ).toBe('queued');
   });
 
-  it('rejects an invalid persona id before opening a transaction', () => {
+  it('R3-10: empty, malformed and non-string persona ids are rejected before the transaction', () => {
     const { a } = openFixture();
     seedPersona(a);
     insertTask(a);
     claim(a);
     const before = snapshot(a, taskId(1));
 
-    expect(
-      codeOf(() =>
-        createRepositories(a).tasks.recoverRunningTask({
-          id: taskId(1),
-          personaId: 'psn_bad' as PersonaId,
-          expectedRunId: runId(1),
-          expectedAttempt: 1,
-          maxAttempts: 3,
-          finishedAt: NOW + 30,
-        }),
-      ),
-    ).toBe('invalid_argument');
+    for (const bad of ['', 'psn_bad', 42]) {
+      expect(
+        codeOf(() =>
+          createRepositories(a).tasks.recoverRunningTask({
+            id: taskId(1),
+            personaId: bad as unknown as PersonaId,
+            expectedRunId: runId(1),
+            expectedAttempt: 1,
+            maxAttempts: 3,
+            finishedAt: NOW + 30,
+          }),
+        ),
+      ).toBe('invalid_argument');
+    }
     expect(snapshot(a, taskId(1))).toStrictEqual(before);
-  });
-
-  it('rejects a stale run id or attempt', () => {
-    const { a } = openFixture();
-    seedPersona(a);
-    insertTask(a);
-    claim(a);
-
-    expect(
-      createRepositories(a).tasks.recoverRunningTask({
-        id: taskId(1),
-        personaId: personaId(1),
-        expectedRunId: runId(2),
-        expectedAttempt: 1,
-        maxAttempts: 3,
-        finishedAt: NOW + 30,
-      }),
-    ).toBeNull();
-    expect(
-      createRepositories(a).tasks.recoverRunningTask({
-        id: taskId(1),
-        personaId: personaId(1),
-        expectedRunId: runId(1),
-        expectedAttempt: 2,
-        maxAttempts: 3,
-        finishedAt: NOW + 30,
-      }),
-    ).toBeNull();
-  });
-
-  it('rejects a running row whose attempt is zero', () => {
-    const { a } = openFixture();
-    seedPersona(a);
-    insertTask(a);
-    claim(a);
-    setAttempt(a, taskId(1), 0);
-
-    expect(
-      createRepositories(a).tasks.recoverRunningTask({
-        id: taskId(1),
-        personaId: personaId(1),
-        expectedRunId: runId(1),
-        expectedAttempt: 1,
-        maxAttempts: 3,
-        finishedAt: NOW + 30,
-      }),
-    ).toBeNull();
   });
 });
 
@@ -934,6 +1171,77 @@ describe('listPageByPersonaState', () => {
         }),
       ),
     ).toBe('invalid_argument');
+  });
+
+  it('R1: rejects atLeast with an extra key', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a);
+    const before = snapshot(a, taskId(1));
+
+    expect(
+      codeOf(() =>
+        createRepositories(a).tasks.listPageByPersonaState({
+          personaId: personaId(1),
+          state: 'queued',
+          attemptFilter: { kind: 'atLeast', value: 1, extra: true } as never,
+        }),
+      ),
+    ).toBe('invalid_argument');
+    expect(snapshot(a, taskId(1))).toStrictEqual(before);
+  });
+
+  it('R1: rejects invalid with an extra key', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a);
+
+    expect(
+      codeOf(() =>
+        createRepositories(a).tasks.listPageByPersonaState({
+          personaId: personaId(1),
+          state: 'queued',
+          attemptFilter: { kind: 'invalid', value: 1 } as never,
+        }),
+      ),
+    ).toBe('invalid_argument');
+  });
+
+  it('R1: rejects null, arrays and non-objects before any database access', () => {
+    // A bare store would throw a TypeError if validation let a query through.
+    const repo = createTaskRepository({} as unknown as Store);
+
+    for (const bad of [null, [], 'atLeast', 42]) {
+      expect(
+        codeOf(() =>
+          repo.listPageByPersonaState({
+            personaId: personaId(1),
+            state: 'queued',
+            attemptFilter: bad as never,
+          }),
+        ),
+      ).toBe('invalid_argument');
+    }
+  });
+
+  it('R1: rejects an attemptFilter.value that is not a non-negative safe integer', () => {
+    const { a } = openFixture();
+    seedPersona(a);
+    insertTask(a);
+    const before = snapshot(a, taskId(1));
+
+    for (const bad of [-1, 1.5, '3', Number.MAX_SAFE_INTEGER + 1]) {
+      expect(
+        codeOf(() =>
+          createRepositories(a).tasks.listPageByPersonaState({
+            personaId: personaId(1),
+            state: 'queued',
+            attemptFilter: { kind: 'atLeast', value: bad } as never,
+          }),
+        ),
+      ).toBe('invalid_argument');
+    }
+    expect(snapshot(a, taskId(1))).toStrictEqual(before);
   });
 });
 

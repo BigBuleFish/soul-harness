@@ -100,7 +100,11 @@ export interface FailTaskInput {
   readonly maxAttempts: number;
   readonly retry: boolean;
   readonly finishedAt: number;
-  readonly nextScheduledAt?: number | null;
+  /**
+   * Required, not optional: `null` means "immediately due", a timestamp means
+   * "due then". Persistence never derives a backoff on its own.
+   */
+  readonly nextScheduledAt: number | null;
 }
 
 export interface FailExhaustedTaskInput {
@@ -241,6 +245,40 @@ function encodePayloadRefs(refs: TaskPayloadRefs | undefined): string | null {
     payload['threadId'] = refs.threadId;
   }
   return encodeOptionalJson(JSON_SCHEMA_IDS.taskPayload, payload as JsonObject);
+}
+
+/**
+ * Validates the discriminant and rejects anything that is not an exact shape:
+ * `{ kind: 'atLeast', value }` or `{ kind: 'invalid' }`. Extra keys, `null`,
+ * arrays and non-objects all become `invalid_argument` here, before any query.
+ */
+function assertAttemptFilter(value: unknown): asserts value is TaskAttemptFilter {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    invalid('attemptFilter', 'must be an object with a known kind');
+  }
+  const filter = value as Record<string, unknown>;
+  const keys = Object.keys(filter);
+  const kind = filter['kind'];
+
+  if (kind === 'atLeast') {
+    if (keys.length !== 2 || !keys.includes('kind') || !keys.includes('value')) {
+      invalid('attemptFilter', 'atLeast accepts exactly { kind, value }');
+    }
+    const raw = filter['value'];
+    if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0) {
+      invalid('attemptFilter.value', 'must be a non-negative safe integer');
+    }
+    return;
+  }
+
+  if (kind === 'invalid') {
+    if (keys.length !== 1 || keys[0] !== 'kind') {
+      invalid('attemptFilter', 'invalid accepts exactly { kind }');
+    }
+    return;
+  }
+
+  invalid('attemptFilter.kind', "must be 'atLeast' or 'invalid'");
 }
 
 function mapTask(raw: Readonly<Record<string, unknown>>): TaskRow {
@@ -435,7 +473,10 @@ export function createTaskRepository(store: Store) {
         invalid('retry', 'must be a boolean');
       }
       assertSafeNonNegative(input.finishedAt, 'finishedAt');
-      const nextScheduledAt = input.nextScheduledAt ?? null;
+      if (!('nextScheduledAt' in input) || input.nextScheduledAt === undefined) {
+        invalid('nextScheduledAt', 'is required (use null for immediately due)');
+      }
+      const nextScheduledAt: number | null = input.nextScheduledAt;
       if (nextScheduledAt !== null) {
         assertSafeNonNegative(nextScheduledAt, 'nextScheduledAt');
       }
@@ -653,16 +694,14 @@ export function createTaskRepository(store: Store) {
       let filterSql = '';
       const filterParams: number[] = [];
       if (filter !== undefined) {
+        assertAttemptFilter(filter);
         if (filter.kind === 'atLeast') {
-          assertSafeNonNegative(filter.value, 'attemptFilter.value');
           filterSql =
             " AND typeof(attempt) = 'integer' AND attempt >= 0 AND attempt <= ? AND attempt >= ?";
           filterParams.push(MAX_SAFE, filter.value);
-        } else if (filter.kind === 'invalid') {
+        } else {
           filterSql = " AND NOT (typeof(attempt) = 'integer' AND attempt >= 0 AND attempt <= ?)";
           filterParams.push(MAX_SAFE);
-        } else {
-          invalid('attemptFilter.kind', "must be 'atLeast' or 'invalid'");
         }
       }
 
