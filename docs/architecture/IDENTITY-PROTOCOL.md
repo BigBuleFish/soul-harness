@@ -1,7 +1,7 @@
 # IDENTITY-PROTOCOL — 六类核心身份协议
 
 - **地位**：身份语义的唯一权威描述。与 `OVERVIEW.md` §5 的概览表冲突时，以本文为准。
-- **状态**：**协议已冻结。** 格式校验已在 SH-004（`packages/contracts`）落地。ID 分配器已在 SH-008A（`packages/runtime`）实现并通过该批测试。进程内 P1 Ingress 的代码已在 SH-008C 合并（包内函数；Daemon 未装配；§12 标成「部分」的只覆盖写明的那一层）。Scheduler 已在 SH-008D D3 实现，D3.R1 已通过独立复审；Daemon 未装配。动作身份的运行时路径未实现。§12 里没有写明进度的验收项仍然未实现。
+- **状态**：**协议已冻结。** 格式校验已在 SH-004（`packages/contracts`）落地。ID 分配器已在 SH-008A（`packages/runtime`）实现并通过该批测试。进程内 P1 Ingress 的代码已在 SH-008C 合并（包内函数；Daemon 未装配；§12 标成「部分」的只覆盖写明的那一层）。Scheduler 已在 SH-008D D3 实现，D3.R1 已通过独立复审；SH-008D 已完成并通过独立复审与整批验收（D4 `8c10f39`，D4.R1 `4f290e8`）；Daemon 未装配。动作身份的运行时路径未实现。§12 里没有写明进度的验收项仍然未实现。
 - **上位决策**：`ADR-001`（独立运行时 / camelCase 线协议 / snake_case 数据库 / persistence 负责映射）
 - **配套**：`DATA-MODEL.md`（列与约束）、`RUNTIME-LIFECYCLE.md`（状态机）、`TRUST-BOUNDARIES.md`（权限域）
 
@@ -499,7 +499,7 @@ CREATE UNIQUE INDEX ux_sessions_external
 | I02 | 所有 ID 由 Harness 生成；Adapter 提交内部 ID 一律拒绝 | 未实现 |
 | I03 | 相同 `(personaId, adapterId, source, adapterEventRef)` 重投返回同一 `eventId` | **部分（SH-008C 进程内 Ingress）**：同键再次 `acceptStimulus` 返回既有 `eventId`，不插入第二行（`packages/runtime/test/ingress.test.ts`）。`bodyVerified` 恒为 `false`。无 HTTP，Daemon 未调用。整条验收未通过 |
 | I04 | 不同 Adapter 或不同 persona 使用相同 `adapterEventRef` 不冲突 | **索引已落地，事件用例未测完**：`ux_events_dedupe` 是 `(persona_id, adapter_id, source, adapter_event_ref)`。`ingress.test.ts` 没有用同一 `adapterEventRef` 对两个 persona 或两个 adapter 断言两条事件行。不写成通过 |
-| I05 | 每次重试产生新 `runId`，`taskId` 不变，`attemptNo` 递增 | **部分（D1 原语与 D3 派发路径，整条验收未通过）**：`claimNext` 在领取时 `attempt+1` 并写入新 `runId`，`taskId` 不变。失败退回 `queued` 时不加 `attempt`，下一次领取再加。崩溃恢复不加 `attempt`、不换 `runId`。Scheduler 的 `claimOne` 调用 `claimNext`，`scheduler.test.ts` 覆盖 attempt / runId。Daemon 未装配；D4 已完成包内集成与文档收尾、等待独立复审，身份协议这一整条仍未验收通过 |
+| I05 | 每次重试产生新 `runId`，`taskId` 不变，`attemptNo` 递增 | **部分（D1 原语与 D3 派发路径，整条验收未通过）**：`claimNext` 在领取时 `attempt+1` 并写入新 `runId`，`taskId` 不变。失败退回 `queued` 时不加 `attempt`，下一次领取再加。崩溃恢复不加 `attempt`、不换 `runId`。Scheduler 的 `claimOne` 调用 `claimNext`，`scheduler.test.ts` 覆盖 attempt / runId。D4 已随 SH-008D 整批验收通过；Daemon 未装配，身份协议这一整条仍未验收通过 |
 | I06 | 同一意图的所有重试复用同一 `actionId` | 未实现 |
 | I07 | 无 `actionId` 或 `actionId` 不匹配的回执被拒绝 | 未实现 |
 | I08 | 崩溃恢复后 `executing` 动作不因重启被标记成功 | 未实现 |

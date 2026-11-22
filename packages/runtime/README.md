@@ -1,7 +1,7 @@
 # `@soul-harness/runtime` — 认知运行时
 
 - **地位**：L3 编排层。业务逻辑在这里，不在 Daemon（[MODULES](../../docs/architecture/MODULES.md) §2–§4）。
-- **状态**：包内已有代码：SH-008A ID 分配器；SH-008B 进程内 Persona 生命周期；SH-008C 进程内 P1 Ingress；SH-008D D2 的 `recoverRuntime`（D2.R1–R4 已通过最终独立代码复审）；SH-008D D3 的 `createScheduler`（D3.R1 已通过独立复审）。D1 的任务条件写在 persistence，D1.R1 已通过独立复审。D4 已完成集成验证与文档收尾，等待独立复审；D4 复审通过前 SH-008D 整批不验收。扫描 A/B、检查点装载/写出不在本包。Daemon 装配是 SH-008E，未开始。本目录没有扫描 A/B、检查点编排或 Daemon 的空类。
+- **状态**：包内已有代码：SH-008A ID 分配器；SH-008B 进程内 Persona 生命周期；SH-008C 进程内 P1 Ingress；SH-008D D2 的 `recoverRuntime`（D2.R1–R4 已通过最终独立代码复审）；SH-008D D3 的 `createScheduler`（D3.R1 已通过独立复审）。D1 的任务条件写在 persistence，D1.R1 已通过独立复审。SH-008D 已完成并通过独立复审与整批验收（D4 `8c10f39`，D4.R1 `4f290e8`）；Recovery 与 Scheduler 均通过包根公共入口 `recoverRuntime` / `createScheduler` 使用，共享同一 Store lease 互斥，集成验证已进入 consumer-check。扫描 A/B、检查点装载/写出不在本包。Daemon 装配是 SH-008E，未开始；HTTP/WebSocket 属未开始的 SH-009。本目录没有扫描 A/B、检查点编排或 Daemon 的空类。
 - **上位文档**：[RUNTIME-LIFECYCLE](../../docs/architecture/RUNTIME-LIFECYCLE.md) §4–§5、§7、§9，[IDENTITY-PROTOCOL](../../docs/architecture/IDENTITY-PROTOCOL.md) §3、§4.2、§4.5、§4.5.1，[DATA-MODEL](../../docs/architecture/DATA-MODEL.md) §3、§3.1、§6，[PLAN](../../docs/PLAN.md) §6.3，[MODULES](../../docs/architecture/MODULES.md) §2–§3。
 
 ## 1. 负责什么
@@ -129,7 +129,7 @@ U1 的 `attempt` 必须是**安全整数**且 `≥ 1`（与 Persistence 的 `rec
 
 ### 1.5 Task Scheduler（SH-008D D3）
 
-`createScheduler({ store, logger, policy, handlers, config?, now?, timers?, randomBytes? })` 返回 `TaskScheduler`。这是已提交的 D3 代码；D3.R1（`86eab59`）已通过独立复审。D4 已完成集成验证与文档收尾、等待独立复审；D4 复审通过前 SH-008D 整批未验收。Daemon 不调用 `createScheduler`。Scheduler **只**通过 Persistence Repository 的具名方法读取、领取和收口任务；不写 SQL、不改 Migration、不做 Daemon 装配。
+`createScheduler({ store, logger, policy, handlers, config?, now?, timers?, randomBytes? })` 返回 `TaskScheduler`。这是已提交的 D3 代码；D3.R1（`86eab59`）已通过独立复审，并随 SH-008D 整批验收通过。Daemon 不调用 `createScheduler`。Scheduler **只**通过 Persistence Repository 的具名方法读取、领取和收口任务；不写 SQL、不改 Migration、不做 Daemon 装配。
 
 **Handler 契约**：`handlers` 是创建时给定的不可变映射（`Map` 或普通对象），key 必须匹配 `^[a-z][a-z0-9._-]{0,63}$`，value 为 `(task, ctx) => void | Promise<void>`。`ctx = { runId, logger, signal }`，`signal.aborted` 恒为 `false`（running 任务不支持取消）。没有运行时 register/unregister；Handler 不得自行修改任务状态。
 
@@ -166,7 +166,7 @@ U1 的 `attempt` 必须是**安全整数**且 `≥ 1`（与 Persistence 的 `rec
 - **编译期**（`tools/consumer-check/index.ts`）：以包名导入 `recoverRuntime`、`createScheduler`、`RecoverRuntimeOptions`、`RecoveryPolicy`、`SchedulerOptions`、`TaskScheduler`、`TaskHandler`；把同一个 `RecoveryPolicy` 同时传给 Recovery 与 Scheduler，用合法 Handler Map 构造 Scheduler；并保留负向断言（缺少 policy / handlers、非法 policy、公开 `TaskScheduler` 没有 `registerHandler`）。
 - **运行期**（`run.mjs`）：在独立临时目录真实调用 `recoverRuntime`（空库返回 `incomplete: null`）与 `createScheduler`（`created` → `running` → `stopped`，`stats()` 无在途 Handler）；验证同一 Store 对象的 lease 双向互斥——Scheduler 存活时 Recovery 以 `illegal_transition` 拒绝且不改数据，Recovery 持租窗口内 Scheduler 创建失败、租约释放后可创建；并验证 `stop()` 在途 Handler 完成前 lease 不提前释放，完成后 Recovery 可取得。
 
-D4 完成的是包内集成验证与文档收尾，不代表 Daemon 已装配（SH-008E）、也不代表 SH-008D 整批已验收；整批验收要等 D4 独立复审通过。
+D4 完成的是包内集成验证与文档收尾，并已随 SH-008D 整批验收通过；这不代表 Daemon 已装配（SH-008E），也不代表 SH-008E 或 SH-007B 已完成。
 
 ## 2. 不负责什么
 
