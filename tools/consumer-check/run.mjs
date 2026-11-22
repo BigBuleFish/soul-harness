@@ -372,7 +372,7 @@ const closeConsumerStore = ({ dir, store }) => {
     const tasksBefore = fixture.repos.tasks.listByPersonaState({
       personaId: PERSONA,
       state: 'queued',
-    }).length;
+    });
     const eventBefore = fixture.repos.events.getById({ personaId: PERSONA, id: EVENT_ID });
     await assert.rejects(
       runtime.recoverRuntime({
@@ -383,8 +383,8 @@ const closeConsumerStore = ({ dir, store }) => {
       }),
       (error) => runtime.isRuntimeError(error) && error.code === 'illegal_transition',
     );
-    assert.equal(
-      fixture.repos.tasks.listByPersonaState({ personaId: PERSONA, state: 'queued' }).length,
+    assert.deepEqual(
+      fixture.repos.tasks.listByPersonaState({ personaId: PERSONA, state: 'queued' }),
       tasksBefore,
       'a rejected Recovery must not change task rows',
     );
@@ -406,34 +406,56 @@ const closeConsumerStore = ({ dir, store }) => {
   }
 }
 
-// 3.3-B Recovery lease blocks Scheduler creation; the lease is released afterwards.
+// 3.3-B Recovery lease blocks Scheduler creation inside the scan body.
 //
-// `recoverRuntime` takes the lease synchronously and only releases it in its
-// `finally` after the awaited scan settles. Calling it without `await` therefore
-// opens a deterministic window that needs no sleep or test-only hook.
+// The `recovery_started` logger callback is invoked by `runRecovery` after the
+// wrapper acquired the lease and before the scan queries run. Attempting to
+// create the Scheduler from that callback is therefore a deterministic in-body
+// probe: no sleep, no race, and no test-only production API.
 {
   const fixture = openConsumerStore('lease-b');
+  let reentrantScheduler = null;
   try {
-    const pendingRecovery = runtime.recoverRuntime({
+    let startedCalls = 0;
+    let reentrantError = null;
+    const reentrantLogger = {
+      debug() {},
+      info(event) {
+        if (event !== 'recovery_started') {
+          return;
+        }
+        startedCalls += 1;
+        try {
+          reentrantScheduler = runtime.createScheduler({
+            store: fixture.store,
+            logger: noop,
+            policy: POLICY,
+            handlers: { 'thought.run': () => undefined },
+            now: () => NOW,
+            timers: noopTimers,
+          });
+        } catch (error) {
+          // The probe must never escape the logger callback.
+          reentrantError = error;
+        }
+      },
+      warn() {},
+      error() {},
+    };
+
+    const report = await runtime.recoverRuntime({
       store: fixture.store,
-      logger: noop,
+      logger: reentrantLogger,
       policy: POLICY,
       now: () => NOW,
     });
-    assert.throws(
-      () =>
-        runtime.createScheduler({
-          store: fixture.store,
-          logger: noop,
-          policy: POLICY,
-          handlers: { 'thought.run': () => undefined },
-          now: () => NOW,
-          timers: noopTimers,
-        }),
-      (error) => runtime.isRuntimeError(error) && error.code === 'illegal_transition',
-    );
-    const report = await pendingRecovery;
+
+    assert.equal(startedCalls, 1, 'recovery_started must fire exactly once');
+    assert.notEqual(reentrantError, null, 'Scheduler creation inside Recovery must fail');
+    assert.equal(runtime.isRuntimeError(reentrantError), true);
+    assert.equal(reentrantError.code, 'illegal_transition');
     assert.equal(report.incomplete, null);
+
     const scheduler = runtime.createScheduler({
       store: fixture.store,
       logger: noop,
@@ -444,7 +466,11 @@ const closeConsumerStore = ({ dir, store }) => {
     });
     assert.equal(scheduler.state, 'created');
     await scheduler.stop();
+    assert.equal(scheduler.state, 'stopped');
   } finally {
+    if (reentrantScheduler !== null) {
+      await reentrantScheduler.stop();
+    }
     closeConsumerStore(fixture);
   }
 }
